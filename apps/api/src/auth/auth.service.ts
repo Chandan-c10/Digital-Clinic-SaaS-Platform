@@ -9,6 +9,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { ClinicPlan, ClinicStatus, Role, User } from "@digital-clinic/database";
 import { PrismaService } from "../prisma/prisma.service";
 import { RegisterClinicDto } from "./dto/register-clinic.dto";
+import { RegisterPatientDto } from "./dto/register-patient.dto";
 import { LoginDto } from "./dto/login.dto";
 import { hashPassword, verifyPassword } from "./password.util";
 
@@ -77,11 +78,38 @@ export class AuthService {
     return { user: this.toPublicUser(user), clinic, ...tokens };
   }
 
+  /**
+   * Creates a Patient Portal login — `clinicId: null`, same as SUPER_ADMIN,
+   * since a patient isn't scoped to one clinic (see the User model comment).
+   * Deliberately does NOT try to auto-link this account to any existing
+   * walk-in `Patient` rows matching this email/phone — guessing that link
+   * risks attaching someone else's medical record to the wrong login. A
+   * `Patient` row is created fresh, per clinic, the first time this user
+   * books through the portal (see PatientPortalService.bookAppointment).
+   */
+  async registerPatient(dto: RegisterPatientDto) {
+    const existing = await this.prisma.user.findUnique({ where: { email: dto.email } });
+    if (existing) throw new ConflictException("Email already registered");
+
+    const user = await this.prisma.user.create({
+      data: {
+        name: dto.name,
+        email: dto.email,
+        phone: dto.phone,
+        passwordHash: hashPassword(dto.password),
+        role: Role.PATIENT,
+      },
+    });
+
+    const tokens = await this.issueTokens(user);
+    return { user: this.toPublicUser(user), ...tokens };
+  }
+
   async login(dto: LoginDto, meta: RequestMeta = {}) {
     const user = await this.prisma.user.findUnique({ where: { email: dto.email } });
     const passwordOk = user?.passwordHash ? verifyPassword(dto.password, user.passwordHash) : false;
 
-    if (!user || !passwordOk) {
+    if (!user || !passwordOk || !user.isActive) {
       if (user) {
         await this.prisma.loginEvent.create({
           data: { userId: user.id, success: false, ...meta },
@@ -105,7 +133,7 @@ export class AuthService {
       include: { user: true },
     });
 
-    if (!stored || stored.revokedAt || stored.expiresAt < new Date()) {
+    if (!stored || stored.revokedAt || stored.expiresAt < new Date() || !stored.user.isActive) {
       throw new UnauthorizedException("Refresh token is invalid or expired");
     }
 

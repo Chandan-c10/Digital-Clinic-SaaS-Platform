@@ -1,18 +1,84 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ACCESS_TOKEN_COOKIE } from "@/lib/constants";
+import { ACCESS_TOKEN_COOKIE, API_BASE_URL, REFRESH_TOKEN_COOKIE } from "@/lib/constants";
+import {
+  ACCESS_TOKEN_MAX_AGE,
+  REFRESH_TOKEN_MAX_AGE,
+  sessionCookieOptions,
+} from "@/lib/session-cookies";
 
 const APP_DOMAIN = process.env.NEXT_PUBLIC_APP_DOMAIN ?? "platform.local";
 
-export function middleware(req: NextRequest) {
+/**
+ * Access tokens are short-lived (15m default) and nothing else in the app
+ * ever calls this — without it, every dashboard session would hard-expire
+ * every 15 minutes despite holding a valid 30-day refresh token. Returns
+ * null on any failure (expired/revoked refresh token, API unreachable) so
+ * the caller falls back to redirecting to login.
+ */
+async function refreshSession(
+  refreshToken: string,
+): Promise<{ accessToken: string; refreshToken: string } | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as { accessToken: string; refreshToken: string };
+  } catch {
+    return null;
+  }
+}
+
+// Dashboard (clinic staff) and portal (patients) are separate login flows
+// with separate landing pages, but share the same cookie-based session
+// mechanism — see apps/web/src/lib/session-cookies.ts.
+const PROTECTED_PREFIXES = [
+  { prefix: "/dashboard", loginPath: "/login" },
+  { prefix: "/portal", loginPath: "/portal/login" },
+];
+
+export async function middleware(req: NextRequest) {
   const url = req.nextUrl;
   const hostname = req.headers.get("host")?.split(":")[0] ?? "";
 
-  // Dashboard routes require a session cookie. This is a fast, cheap check
-  // only — the NestJS API is what actually verifies the JWT signature on
-  // every request; the dashboard layout also re-checks server-side.
-  if (url.pathname.startsWith("/dashboard") && !req.cookies.get(ACCESS_TOKEN_COOKIE)) {
-    const loginUrl = new URL("/login", req.url);
-    return NextResponse.redirect(loginUrl);
+  const protectedMatch = PROTECTED_PREFIXES.find((p) => url.pathname.startsWith(p.prefix));
+
+  // Protected routes require a session. This is a fast, cheap check plus a
+  // silent refresh when the access token cookie has expired — the NestJS API
+  // is what actually verifies the JWT signature on every request; the
+  // dashboard/portal layouts also re-check server-side. This is a UX layer
+  // (avoid an unnecessary forced logout every 15 minutes), not the security
+  // boundary.
+  if (protectedMatch && !req.cookies.get(ACCESS_TOKEN_COOKIE)) {
+    const refreshToken = req.cookies.get(REFRESH_TOKEN_COOKIE)?.value;
+    const refreshed = refreshToken ? await refreshSession(refreshToken) : null;
+
+    if (!refreshed) {
+      const loginUrl = new URL(protectedMatch.loginPath, req.url);
+      const redirectResponse = NextResponse.redirect(loginUrl);
+      redirectResponse.cookies.delete(ACCESS_TOKEN_COOKIE);
+      redirectResponse.cookies.delete(REFRESH_TOKEN_COOKIE);
+      return redirectResponse;
+    }
+
+    // Forward the refreshed token on the request itself so this same
+    // request's server components see it immediately, not just the next one.
+    req.cookies.set(ACCESS_TOKEN_COOKIE, refreshed.accessToken);
+    const response = NextResponse.next({ request: { headers: req.headers } });
+    response.cookies.set(
+      ACCESS_TOKEN_COOKIE,
+      refreshed.accessToken,
+      sessionCookieOptions(ACCESS_TOKEN_MAX_AGE),
+    );
+    response.cookies.set(
+      REFRESH_TOKEN_COOKIE,
+      refreshed.refreshToken,
+      sessionCookieOptions(REFRESH_TOKEN_MAX_AGE),
+    );
+    return response;
   }
 
   // Subdomain routing: {slug}.platform.local -> /c/{slug} (the clinic's
@@ -35,5 +101,5 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/"],
+  matcher: ["/dashboard/:path*", "/portal/:path*", "/"],
 };

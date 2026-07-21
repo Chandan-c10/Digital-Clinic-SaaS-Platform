@@ -1,0 +1,36 @@
+# Render Blueprint for apps/api. Deploy: connect this repo in the Render
+# dashboard ("New +" -> "Blueprint"), Render reads this file automatically.
+# Frontend (apps/web) is NOT here — deploy that separately on Vercel
+# (Root Directory: apps/web) per README § Deployment.
+services:
+  - type: web
+    name: digital-clinic-api
+    runtime: node
+    plan: starter # avoids free-tier cold starts (see README § Deployment)
+    region: oregon
+    buildCommand: pnpm install && pnpm --filter @digital-clinic/database generate && pnpm --filter @digital-clinic/api build
+    startCommand: pnpm --filter @digital-clinic/database exec prisma migrate deploy && node apps/api/dist/main.js
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false # set manually to the Neon connection string
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_ACCESS_EXPIRES_IN
+        value: 15m
+      - key: JWT_REFRESH_EXPIRES_IN
+        value: 30d
+      - key: API_CORS_ORIGIN
+        sync: false # set to the Vercel frontend URL
+      - key: CRON_SECRET
+        generateValue: true # shared secret for the cron-job.org reminder ping
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false

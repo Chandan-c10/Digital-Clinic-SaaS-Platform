@@ -1,4 +1,6 @@
+import { redirect } from "next/navigation";
 import { apiFetch } from "@/lib/api";
+import { getSession } from "@/lib/session";
 import type { Appointment, Patient } from "@/lib/types";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
@@ -11,6 +13,14 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
 }
 
 export default async function DashboardOverviewPage() {
+  // ACCOUNTANT can't call /appointments or /patients (see STAFF_ROLES on
+  // those controllers) — billing/reports are their actual landing pages,
+  // not this clinical overview.
+  const session = getSession();
+  if (session?.role === "ACCOUNTANT") {
+    redirect("/dashboard/billing");
+  }
+
   const [appointments, patients] = await Promise.all([
     apiFetch<Appointment[]>("/appointments"),
     apiFetch<Patient[]>("/patients"),

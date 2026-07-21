@@ -53,6 +53,21 @@ async function main() {
     data: { clinicId: clinic.id },
   });
 
+  // A single branch, wired through availability/appointment/invoice below —
+  // demonstrates the multi-branch feature works end to end even though this
+  // demo clinic only has the one location (branches are opt-in per README §
+  // Roadmap; a clinic can also just leave branchId null everywhere).
+  const branch = await prisma.branch.create({
+    data: {
+      clinicId: clinic.id,
+      name: "Main Branch",
+      addressLine1: "12 MG Road",
+      city: "Bengaluru",
+      state: "Karnataka",
+      phone: "+918000000000",
+    },
+  });
+
   const doctorUser = await prisma.user.create({
     data: {
       name: "Dr. Anjali Rao",
@@ -80,6 +95,7 @@ async function main() {
   await prisma.doctorAvailability.createMany({
     data: [1, 2, 3, 4, 5].map((dayOfWeek) => ({
       doctorId: doctor.id,
+      branchId: branch.id,
       dayOfWeek,
       startTime: "09:00",
       endTime: "13:00",
@@ -87,25 +103,187 @@ async function main() {
     })),
   });
 
+  const receptionist = await prisma.user.create({
+    data: {
+      name: "Kavya Nair",
+      email: "reception@sunrise-clinic.test",
+      passwordHash: hashPassword("Password123!"),
+      role: Role.RECEPTIONIST,
+      isEmailVerified: true,
+      clinicId: clinic.id,
+    },
+  });
+
+  await prisma.user.create({
+    data: {
+      name: "Meera Iyer",
+      email: "accounts@sunrise-clinic.test",
+      passwordHash: hashPassword("Password123!"),
+      role: Role.ACCOUNTANT,
+      isEmailVerified: true,
+      clinicId: clinic.id,
+    },
+  });
+
+  // A Patient Portal login, linked to the walk-in Patient record below via
+  // userId — demonstrates the "claimed" case (see the Patient model
+  // comment); a portal account with no linked Patient row yet is the
+  // "just registered, hasn't visited anywhere" case and needs no seed data.
+  const patientUser = await prisma.user.create({
+    data: {
+      name: "Ramesh Kumar",
+      email: "ramesh.patient@example.test",
+      phone: "+919999999999",
+      passwordHash: hashPassword("Password123!"),
+      role: Role.PATIENT,
+      isEmailVerified: true,
+    },
+  });
+
   const patient = await prisma.patient.create({
     data: {
       clinicId: clinic.id,
+      userId: patientUser.id,
       name: "Ramesh Kumar",
       phone: "+919999999999",
+      email: "ramesh.patient@example.test",
       gender: "male",
       allergies: [],
     },
   });
 
-  await prisma.appointment.create({
+  const upcomingAppointment = await prisma.appointment.create({
     data: {
       clinicId: clinic.id,
       patientId: patient.id,
       doctorId: doctor.id,
+      branchId: branch.id,
       scheduledAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       status: "CONFIRMED",
       type: "ONLINE",
       reasonForVisit: "Routine checkup",
+    },
+  });
+
+  await prisma.prescription.create({
+    data: {
+      clinicId: clinic.id,
+      patientId: patient.id,
+      doctorId: doctor.id,
+      branchId: branch.id,
+      appointmentId: upcomingAppointment.id,
+      medicines: [
+        {
+          name: "Paracetamol",
+          dosage: "500mg",
+          frequency: "twice daily",
+          durationDays: 5,
+          instructions: "After food",
+        },
+      ],
+      notes: "Follow up if fever persists beyond 3 days.",
+    },
+  });
+
+  const paidInvoice = await prisma.invoice.create({
+    data: {
+      clinicId: clinic.id,
+      patientId: patient.id,
+      invoiceNumber: 1,
+      lineItems: [{ description: "Consultation — General Physician", quantity: 1, unitPrice: 500 }],
+      subtotal: 500,
+      totalAmount: 500,
+      amountPaid: 500,
+      status: "PAID",
+      createdById: receptionist.id,
+    },
+  });
+
+  await prisma.payment.create({
+    data: {
+      clinicId: clinic.id,
+      invoiceId: paidInvoice.id,
+      amount: 500,
+      method: "UPI",
+      reference: "UPI-DEMO-0001",
+      recordedById: receptionist.id,
+    },
+  });
+
+  await prisma.invoice.create({
+    data: {
+      clinicId: clinic.id,
+      patientId: patient.id,
+      invoiceNumber: 2,
+      lineItems: [
+        { description: "Consultation — General Physician", quantity: 1, unitPrice: 500 },
+        { description: "Blood test panel", quantity: 1, unitPrice: 800 },
+      ],
+      subtotal: 1300,
+      discountAmount: 100,
+      totalAmount: 1200,
+      amountPaid: 0,
+      status: "UNPAID",
+      createdById: receptionist.id,
+    },
+  });
+
+  const paracetamol = await prisma.inventoryItem.create({
+    data: {
+      clinicId: clinic.id,
+      name: "Paracetamol 500mg",
+      sku: "MED-PARA-500",
+      unit: "tablet",
+      category: "Medicine",
+      reorderLevel: 50,
+    },
+  });
+
+  await prisma.inventoryTransaction.create({
+    data: {
+      clinicId: clinic.id,
+      itemId: paracetamol.id,
+      branchId: branch.id,
+      type: "RECEIVED",
+      quantity: 200,
+      reason: "Initial stock",
+      performedById: receptionist.id,
+    },
+  });
+
+  await prisma.inventoryTransaction.create({
+    data: {
+      clinicId: clinic.id,
+      itemId: paracetamol.id,
+      branchId: branch.id,
+      type: "DISPENSED",
+      quantity: -20,
+      reason: "Dispensed against prescriptions",
+      performedById: receptionist.id,
+    },
+  });
+
+  // Below its reorderLevel (30) — demonstrates the low-stock indicator.
+  const gloves = await prisma.inventoryItem.create({
+    data: {
+      clinicId: clinic.id,
+      name: "Examination Gloves (box of 100)",
+      sku: "SUP-GLOVE-100",
+      unit: "box",
+      category: "Consumable",
+      reorderLevel: 30,
+    },
+  });
+
+  await prisma.inventoryTransaction.create({
+    data: {
+      clinicId: clinic.id,
+      itemId: gloves.id,
+      branchId: branch.id,
+      type: "RECEIVED",
+      quantity: 15,
+      reason: "Initial stock",
+      performedById: receptionist.id,
     },
   });
 

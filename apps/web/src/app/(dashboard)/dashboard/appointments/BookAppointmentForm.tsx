@@ -19,16 +19,25 @@ export function BookAppointmentForm({ doctors, patients }: Props) {
   const [slots, setSlots] = useState<string[]>([]);
   const [selectedSlot, setSelectedSlot] = useState("");
   const [loadingSlots, setLoadingSlots] = useState(false);
+  const [slotsError, setSlotsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open || !doctorId || !date) return;
     setLoadingSlots(true);
+    setSlotsError(null);
     setSelectedSlot("");
     fetch(`/api/appointments/available-slots?doctorId=${doctorId}&date=${date}`)
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error("Could not load available slots");
+        return res.json();
+      })
       .then((data) => setSlots(Array.isArray(data) ? data : []))
+      .catch(() => {
+        setSlots([]);
+        setSlotsError("Could not load available slots. Try a different date or reopen the form.");
+      })
       .finally(() => setLoadingSlots(false));
   }, [open, doctorId, date]);
 
@@ -114,7 +123,8 @@ export function BookAppointmentForm({ doctors, patients }: Props) {
       <div>
         <span className="mb-2 block text-sm font-medium text-slate-700">Available slots</span>
         {loadingSlots && <p className="text-sm text-slate-500">Loading…</p>}
-        {!loadingSlots && slots.length === 0 && (
+        {!loadingSlots && slotsError && <p className="text-sm text-red-600">{slotsError}</p>}
+        {!loadingSlots && !slotsError && slots.length === 0 && (
           <p className="text-sm text-slate-500">No open slots for this day.</p>
         )}
         <div className="flex flex-wrap gap-2">

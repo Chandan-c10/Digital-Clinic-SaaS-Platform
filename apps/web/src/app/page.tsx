@@ -13,8 +13,11 @@ export default function LandingPage() {
       <header className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
         <span className="text-lg font-semibold text-brand-700">Digital Clinic</span>
         <nav className="flex items-center gap-4 text-sm">
+          <Link href="/portal/login" className="text-slate-600 hover:text-slate-900">
+            Patient login
+          </Link>
           <Link href="/login" className="text-slate-600 hover:text-slate-900">
-            Log in
+            Clinic log in
           </Link>
           <Link
             href="/register"

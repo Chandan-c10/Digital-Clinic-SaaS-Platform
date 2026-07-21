@@ -3,26 +3,15 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ACCESS_TOKEN_COOKIE, API_BASE_URL, REFRESH_TOKEN_COOKIE } from "@/lib/constants";
-
-const ACCESS_TOKEN_MAX_AGE = 15 * 60;
-const REFRESH_TOKEN_MAX_AGE = 30 * 24 * 60 * 60;
+import {
+  ACCESS_TOKEN_MAX_AGE,
+  REFRESH_TOKEN_MAX_AGE,
+  sessionCookieOptions,
+} from "@/lib/session-cookies";
 
 function setSessionCookies(accessToken: string, refreshToken: string) {
-  const secure = process.env.NODE_ENV === "production";
-  cookies().set(ACCESS_TOKEN_COOKIE, accessToken, {
-    httpOnly: true,
-    secure,
-    sameSite: "lax",
-    path: "/",
-    maxAge: ACCESS_TOKEN_MAX_AGE,
-  });
-  cookies().set(REFRESH_TOKEN_COOKIE, refreshToken, {
-    httpOnly: true,
-    secure,
-    sameSite: "lax",
-    path: "/",
-    maxAge: REFRESH_TOKEN_MAX_AGE,
-  });
+  cookies().set(ACCESS_TOKEN_COOKIE, accessToken, sessionCookieOptions(ACCESS_TOKEN_MAX_AGE));
+  cookies().set(REFRESH_TOKEN_COOKIE, refreshToken, sessionCookieOptions(REFRESH_TOKEN_MAX_AGE));
 }
 
 export async function loginAction(_prevState: unknown, formData: FormData) {

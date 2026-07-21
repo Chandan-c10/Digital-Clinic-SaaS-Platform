@@ -4,6 +4,7 @@ import { Throttle } from "@nestjs/throttler";
 import { Public } from "../common/decorators/public.decorator";
 import { AuthService, RequestMeta } from "./auth.service";
 import { RegisterClinicDto } from "./dto/register-clinic.dto";
+import { RegisterPatientDto } from "./dto/register-patient.dto";
 import { LoginDto } from "./dto/login.dto";
 import { RefreshTokenDto } from "./dto/refresh-token.dto";
 
@@ -15,6 +16,12 @@ export class AuthController {
   @Post("register-clinic")
   registerClinic(@Body() dto: RegisterClinicDto) {
     return this.authService.registerClinic(dto);
+  }
+
+  @Public()
+  @Post("register-patient")
+  registerPatient(@Body() dto: RegisterPatientDto) {
+    return this.authService.registerPatient(dto);
   }
 
   @Public()

@@ -57,6 +57,49 @@ enum AppointmentType {
   WALK_IN
 }
 
+enum InvoiceStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  UPI
+  BANK_TRANSFER
+  OTHER
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  WHATSAPP
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum NotificationType {
+  APPOINTMENT_CONFIRMATION
+  APPOINTMENT_REMINDER
+  INVOICE_CREATED
+  PAYMENT_RECEIVED
+  PRESCRIPTION_READY
+}
+
+enum InventoryTransactionType {
+  RECEIVED
+  DISPENSED
+  ADJUSTED
+  EXPIRED
+  DAMAGED
+}
+
 // ---------------------------------------------------------------------------
 // Identity & tenancy
 // ---------------------------------------------------------------------------
@@ -83,6 +126,12 @@ model Clinic {
   patients      Patient[]
   appointments  Appointment[]
   prescriptions Prescription[]
+  invoices      Invoice[]
+  payments      Payment[]
+  notifications Notification[]
+  branches      Branch[]
+  inventoryItems InventoryItem[]
+  inventoryTransactions InventoryTransaction[]
 
   @@index([status])
 }
@@ -130,6 +179,41 @@ model ClinicWebsite {
   updatedAt         DateTime @updatedAt
 }
 
+/// A physical location belonging to a clinic (module Z, multi-branch).
+/// Purely additive/opt-in: every relation to Branch elsewhere in this schema
+/// is optional. A single-branch clinic creates zero Branch rows and every
+/// existing query keeps working unchanged, with branchId columns simply
+/// null — this is deliberately not a breaking migration. `Patient` and
+/// `DoctorProfile` stay clinic-scoped, not branch-scoped: a patient's
+/// medical identity and a doctor's employment belong to the organization,
+/// not one building. Which branch a specific *visit* happened at is tracked
+/// per-appointment/invoice/prescription instead, via each row's branchId.
+model Branch {
+  id           String    @id @default(cuid())
+  clinic       Clinic    @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId     String
+  name         String
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  state        String?
+  country      String?
+  postalCode   String?
+  phone        String?
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  staff         User[]               @relation("StaffHomeBranch")
+  availabilities DoctorAvailability[]
+  appointments  Appointment[]
+  invoices      Invoice[]
+  prescriptions Prescription[]
+  inventoryTransactions InventoryTransaction[]
+
+  @@index([clinicId])
+}
+
 /// Login identity for every human in the system — super admins, clinic
 /// staff, and patients alike. `clinicId` is null for SUPER_ADMIN and for
 /// PATIENT accounts (a patient can hold appointments at multiple clinics;
@@ -145,20 +229,33 @@ model User {
   isPhoneVerified     Boolean   @default(false)
   isTwoFactorEnabled  Boolean   @default(false)
   twoFactorSecret     String?
+  /// Soft-disable switch for staff accounts (module S, Staff Management).
+  /// Login and token refresh are both rejected while false; the account
+  /// and its history are kept, unlike a delete.
+  isActive            Boolean   @default(true)
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
   clinic              Clinic?   @relation("ClinicMembers", fields: [clinicId], references: [id], onDelete: Cascade)
   clinicId            String?
   ownedClinic         Clinic?   @relation("ClinicOwner")
+  /// Optional "home branch" for staff at a multi-branch clinic (module Z).
+  /// Null means either a single-branch clinic (no branches exist) or a role
+  /// that isn't tied to one location (CLINIC_OWNER, ACCOUNTANT).
+  homeBranch          Branch?   @relation("StaffHomeBranch", fields: [homeBranchId], references: [id])
+  homeBranchId        String?
 
   doctorProfile       DoctorProfile?
   patientRecords      Patient[]        @relation("PatientUser")
   refreshTokens       RefreshToken[]
   loginEvents         LoginEvent[]
+  invoicesCreated     Invoice[]        @relation("InvoiceCreatedBy")
+  paymentsRecorded    Payment[]        @relation("PaymentRecordedBy")
+  inventoryTransactionsPerformed InventoryTransaction[] @relation("InventoryTransactionPerformedBy")
 
   @@index([clinicId])
   @@index([role])
+  @@index([homeBranchId])
 }
 
 /// Hashed refresh tokens so sessions can be listed/revoked individually
@@ -225,6 +322,11 @@ model DoctorAvailability {
   id                 String        @id @default(cuid())
   doctor             DoctorProfile @relation(fields: [doctorId], references: [id], onDelete: Cascade)
   doctorId           String
+  /// Which branch this slot is at (module Z). Null for single-branch
+  /// clinics; at a multi-branch clinic, a doctor sets separate availability
+  /// rows per branch they work at.
+  branch             Branch?       @relation(fields: [branchId], references: [id])
+  branchId           String?
   dayOfWeek          Int // 0 (Sun) – 6 (Sat)
   startTime          String // "09:00"
   endTime            String // "13:00"
@@ -232,7 +334,15 @@ model DoctorAvailability {
   isActive           Boolean       @default(true)
 
   @@index([doctorId])
-  @@unique([doctorId, dayOfWeek, startTime])
+  @@index([branchId])
+  // Note: Postgres treats NULL as distinct from NULL in unique constraints,
+  // so this doesn't actually block duplicate (doctorId, dayOfWeek, startTime)
+  // rows when branchId is null (single-branch clinics). Not tightened to a
+  // partial index for that case — DoctorsService.setAvailability always
+  // fully replaces a doctor's rows in one deleteMany+createMany rather than
+  // inserting incrementally, so the practical risk is a caller submitting
+  // duplicate rows in one request, not a race between separate requests.
+  @@unique([doctorId, branchId, dayOfWeek, startTime])
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +372,7 @@ model Patient {
   appointments    Appointment[]
   prescriptions   Prescription[]
   documents       PatientDocument[]
+  invoices        Invoice[]
 
   @@index([clinicId])
   @@index([userId])
@@ -292,6 +403,10 @@ model Appointment {
   patientId      String
   doctor         DoctorProfile     @relation(fields: [doctorId], references: [id], onDelete: Cascade)
   doctorId       String
+  /// Which branch the visit is at (module Z) — set from the booked
+  /// DoctorAvailability's branch, null for single-branch clinics.
+  branch         Branch?           @relation(fields: [branchId], references: [id])
+  branchId       String?
   scheduledAt    DateTime
   durationMinutes Int              @default(15)
   status         AppointmentStatus @default(PENDING)
@@ -303,10 +418,12 @@ model Appointment {
   updatedAt      DateTime          @updatedAt
 
   prescription   Prescription?
+  invoices       Invoice[]
 
   @@index([clinicId])
   @@index([doctorId, scheduledAt])
   @@index([patientId])
+  @@index([branchId])
 }
 
 /// Digital prescription (basic version for MVP; module M).
@@ -320,10 +437,174 @@ model Prescription {
   patientId     String
   doctor        DoctorProfile @relation(fields: [doctorId], references: [id], onDelete: Cascade)
   doctorId      String
+  /// Which branch this was written at (module Z), inherited from the
+  /// appointment when there is one; null for single-branch clinics.
+  branch        Branch?      @relation(fields: [branchId], references: [id])
+  branchId      String?
   medicines     Json // [{ name, dosage, frequency, durationDays, instructions }]
   notes         String?
   createdAt     DateTime     @default(now())
 
   @@index([clinicId])
   @@index([patientId])
+  @@index([branchId])
+}
+
+// ---------------------------------------------------------------------------
+// Billing (modules I/J — Invoicing & Payments)
+// ---------------------------------------------------------------------------
+
+/// A patient-facing invoice. `lineItems` mirrors the JSON-blob pattern already
+/// used by Prescription.medicines rather than a normalized line-item table —
+/// consistent with the MVP shape used elsewhere in this schema.
+model Invoice {
+  id             String        @id @default(cuid())
+  clinic         Clinic        @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId       String
+  patient        Patient       @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patientId      String
+  appointment    Appointment?  @relation(fields: [appointmentId], references: [id])
+  appointmentId  String?
+  /// Which branch generated this invoice (module Z) — for branch-level
+  /// revenue reporting; null for single-branch clinics.
+  branch         Branch?       @relation(fields: [branchId], references: [id])
+  branchId       String?
+  /// Sequential per clinic (1, 2, 3…), assigned in BillingService.create —
+  /// not a DB identity column, since it must restart per tenant, not globally.
+  invoiceNumber  Int
+  status         InvoiceStatus @default(UNPAID)
+  lineItems      Json // [{ description, quantity, unitPrice }]
+  subtotal       Decimal       @db.Decimal(10, 2)
+  discountAmount Decimal       @default(0) @db.Decimal(10, 2)
+  taxAmount      Decimal       @default(0) @db.Decimal(10, 2)
+  totalAmount    Decimal       @db.Decimal(10, 2)
+  amountPaid     Decimal       @default(0) @db.Decimal(10, 2)
+  currency       String        @default("INR")
+  notes          String?
+  createdBy      User          @relation("InvoiceCreatedBy", fields: [createdById], references: [id])
+  createdById    String
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  payments       Payment[]
+
+  @@unique([clinicId, invoiceNumber])
+  @@index([clinicId])
+  @@index([patientId])
+  @@index([clinicId, status])
+  @@index([branchId])
+}
+
+/// A single recorded payment against an invoice. Payments are recorded
+/// manually by staff (cash/card/UPI/bank transfer at the counter) — there is
+/// no online payment gateway integration yet (see README § Roadmap); that
+/// needs a real Razorpay/Stripe merchant account and API keys this project
+/// doesn't have configured, so it isn't stubbed out here.
+model Payment {
+  id           String        @id @default(cuid())
+  clinic       Clinic        @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId     String
+  invoice      Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoiceId    String
+  amount       Decimal       @db.Decimal(10, 2)
+  method       PaymentMethod
+  reference    String? // e.g. UPI transaction id, cheque number
+  recordedBy   User          @relation("PaymentRecordedBy", fields: [recordedById], references: [id])
+  recordedById String
+  paidAt       DateTime      @default(now())
+  createdAt    DateTime      @default(now())
+
+  @@index([clinicId])
+  @@index([invoiceId])
+}
+
+// ---------------------------------------------------------------------------
+// Communication (module N — Notifications)
+// ---------------------------------------------------------------------------
+
+/// Audit log of every notification attempt. `status` reflects whether the
+/// provider actually accepted it — EMAIL is real (SMTP via nodemailer, see
+/// apps/api/src/notifications/); SMS/WHATSAPP have no provider configured
+/// (no Twilio/MSG91/WhatsApp Business account for this project), so those
+/// always record FAILED with an explanatory `error` until real credentials
+/// are added — see README § Roadmap. Never faked as SENT.
+model Notification {
+  id            String               @id @default(cuid())
+  clinic        Clinic               @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId      String
+  channel       NotificationChannel
+  type          NotificationType
+  recipient     String // email address or phone number
+  subject       String?
+  body          String
+  status        NotificationStatus   @default(PENDING)
+  error         String?
+  sentAt        DateTime?
+  /// Which appointment this notification is about, when it's about one
+  /// (APPOINTMENT_CONFIRMATION/APPOINTMENT_REMINDER) — added specifically so
+  /// the reminder cron job (apps/api/src/cron/) can check "has a reminder
+  /// already gone out for this appointment" without guessing from
+  /// recipient+type+timestamp. Null for notification types not tied to one
+  /// appointment (INVOICE_CREATED, PAYMENT_RECEIVED, PRESCRIPTION_READY).
+  appointment   Appointment?         @relation(fields: [appointmentId], references: [id])
+  appointmentId String?
+  createdAt     DateTime             @default(now())
+
+  @@index([clinicId])
+  @@index([clinicId, status])
+  @@index([appointmentId])
+}
+
+// ---------------------------------------------------------------------------
+// Inventory (module V/module Z-adjacent — Stock Management)
+// ---------------------------------------------------------------------------
+
+/// A catalog entry (medicine/consumable/equipment) a clinic tracks stock
+/// for. Current quantity on hand is *not* stored here — it's computed by
+/// summing InventoryTransaction.quantity (see InventoryService.stockFor),
+/// so it can never drift out of sync with the transaction ledger the way a
+/// separately-maintained running total could.
+model InventoryItem {
+  id           String   @id @default(cuid())
+  clinic       Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId     String
+  name         String
+  sku          String?
+  unit         String // "tablet", "box", "ml", "piece", ...
+  category     String?
+  /// Below this computed quantity, the item shows as low-stock.
+  reorderLevel Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  transactions InventoryTransaction[]
+
+  @@index([clinicId])
+}
+
+/// One entry in the append-only stock ledger. `quantity` is a signed delta —
+/// positive for RECEIVED (and a positive ADJUSTED correction), negative for
+/// DISPENSED/EXPIRED/DAMAGED (and a negative ADJUSTED correction) — current
+/// stock for an item is SUM(quantity), optionally filtered by branch.
+model InventoryTransaction {
+  id            String                    @id @default(cuid())
+  clinic        Clinic                    @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId      String
+  item          InventoryItem             @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  itemId        String
+  /// Which branch this stock movement happened at (module Z) — optional,
+  /// same additive pattern as everywhere else branchId appears.
+  branch        Branch?                   @relation(fields: [branchId], references: [id])
+  branchId      String?
+  type          InventoryTransactionType
+  quantity      Int
+  reason        String?
+  performedBy   User                      @relation("InventoryTransactionPerformedBy", fields: [performedById], references: [id])
+  performedById String
+  createdAt     DateTime                  @default(now())
+
+  @@index([clinicId])
+  @@index([itemId])
+  @@index([branchId])
 }

@@ -1,10 +1,12 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
-import { AppointmentStatus, AppointmentType } from "@digital-clinic/database";
+import { AppointmentStatus, AppointmentType, NotificationChannel, NotificationType } from "@digital-clinic/database";
 import { PrismaService } from "../prisma/prisma.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import { CreateAppointmentDto } from "./dto/create-appointment.dto";
 import { UpdateAppointmentStatusDto } from "./dto/update-appointment-status.dto";
 import { RescheduleAppointmentDto } from "./dto/reschedule-appointment.dto";
 import { AvailableSlotsQueryDto } from "./dto/available-slots-query.dto";
+import { computeAvailableSlots, resolveBranchForTime } from "./available-slots.util";
 
 const ACTIVE_STATUSES: AppointmentStatus[] = [
   AppointmentStatus.PENDING,
@@ -13,7 +15,10 @@ const ACTIVE_STATUSES: AppointmentStatus[] = [
 
 @Injectable()
 export class AppointmentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   async getAvailableSlots(clinicId: string, query: AvailableSlotsQueryDto) {
     const doctor = await this.prisma.doctorProfile.findFirst({
@@ -23,12 +28,6 @@ export class AppointmentsService {
     if (!doctor) throw new NotFoundException("Doctor not found");
 
     const date = new Date(`${query.date}T00:00:00`);
-    const dayOfWeek = date.getDay();
-    const dayAvailabilities = doctor.availabilities.filter(
-      (slot) => slot.dayOfWeek === dayOfWeek && slot.isActive,
-    );
-    if (dayAvailabilities.length === 0) return [];
-
     const dayStart = new Date(date);
     const dayEnd = new Date(date);
     dayEnd.setDate(dayEnd.getDate() + 1);
@@ -44,24 +43,7 @@ export class AppointmentsService {
     });
     const bookedTimes = new Set(bookedAppointments.map((a) => a.scheduledAt.toISOString()));
 
-    const slots: string[] = [];
-    for (const availability of dayAvailabilities) {
-      const [startHour, startMinute] = availability.startTime.split(":").map(Number);
-      const [endHour, endMinute] = availability.endTime.split(":").map(Number);
-
-      const cursor = new Date(date);
-      cursor.setHours(startHour, startMinute, 0, 0);
-      const end = new Date(date);
-      end.setHours(endHour, endMinute, 0, 0);
-
-      while (cursor < end) {
-        if (!bookedTimes.has(cursor.toISOString()) && cursor.getTime() > Date.now()) {
-          slots.push(cursor.toISOString());
-        }
-        cursor.setMinutes(cursor.getMinutes() + availability.slotDurationMinutes);
-      }
-    }
-    return slots.sort();
+    return computeAvailableSlots(date, doctor.availabilities, bookedTimes);
   }
 
   async list(
@@ -78,7 +60,10 @@ export class AppointmentsService {
   async create(clinicId: string, dto: CreateAppointmentDto) {
     const [patient, doctor] = await Promise.all([
       this.prisma.patient.findFirst({ where: { id: dto.patientId, clinicId } }),
-      this.prisma.doctorProfile.findFirst({ where: { id: dto.doctorId, clinicId } }),
+      this.prisma.doctorProfile.findFirst({
+        where: { id: dto.doctorId, clinicId },
+        include: { availabilities: true },
+      }),
     ]);
     if (!patient) throw new NotFoundException("Patient not found");
     if (!doctor) throw new NotFoundException("Doctor not found");
@@ -88,7 +73,12 @@ export class AppointmentsService {
       throw new BadRequestException("Invalid scheduledAt date");
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    // Branch is implied by which availability window this time falls in —
+    // no separate branch selection step in the booking UI (see README §
+    // Architecture, Patient Portal). Null for single-branch clinics.
+    const branchId = resolveBranchForTime(scheduledAt, doctor.availabilities);
+
+    const appointment = await this.prisma.$transaction(async (tx) => {
       const conflict = await tx.appointment.findFirst({
         where: {
           clinicId,
@@ -124,6 +114,7 @@ export class AppointmentsService {
           clinicId,
           patientId: dto.patientId,
           doctorId: dto.doctorId,
+          branchId,
           scheduledAt,
           durationMinutes: dto.durationMinutes ?? 15,
           type,
@@ -134,6 +125,20 @@ export class AppointmentsService {
         include: { patient: true, doctor: true },
       });
     });
+
+    // Fired after the transaction commits, not inside it — a notification
+    // failure (see NotificationsService.send) must never roll back a
+    // successful booking.
+    void this.notifications.send({
+      clinicId,
+      channel: NotificationChannel.EMAIL,
+      type: NotificationType.APPOINTMENT_CONFIRMATION,
+      recipient: appointment.patient.email,
+      subject: "Appointment confirmed",
+      body: `Your appointment with ${appointment.doctor.displayName} is confirmed for ${appointment.scheduledAt.toLocaleString()}.`,
+    });
+
+    return appointment;
   }
 
   async updateStatus(clinicId: string, id: string, dto: UpdateAppointmentStatusDto) {

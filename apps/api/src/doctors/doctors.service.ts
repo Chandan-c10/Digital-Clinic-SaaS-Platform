@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { Role } from "@digital-clinic/database";
 import { PrismaService } from "../prisma/prisma.service";
 import { hashPassword } from "../auth/password.util";
@@ -58,6 +58,18 @@ export class DoctorsService {
 
   async setAvailability(clinicId: string, doctorId: string, dto: SetAvailabilityDto) {
     await this.findOne(clinicId, doctorId);
+
+    const branchIds = [...new Set(dto.slots.map((s) => s.branchId).filter((id): id is string => !!id))];
+    if (branchIds.length > 0) {
+      const branches = await this.prisma.branch.findMany({
+        where: { id: { in: branchIds }, clinicId },
+        select: { id: true },
+      });
+      if (branches.length !== branchIds.length) {
+        throw new BadRequestException("One or more branches don't belong to this clinic");
+      }
+    }
+
     return this.prisma.$transaction(async (tx) => {
       await tx.doctorAvailability.deleteMany({ where: { doctorId } });
       await tx.doctorAvailability.createMany({

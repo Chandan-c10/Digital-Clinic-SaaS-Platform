@@ -9,6 +9,9 @@ import { CreatePatientDto } from "./dto/create-patient.dto";
 import { UpdatePatientDto } from "./dto/update-patient.dto";
 
 const STAFF_ROLES = [Role.CLINIC_OWNER, Role.DOCTOR, Role.RECEPTIONIST, Role.NURSE];
+// ACCOUNTANT gets read-only access — billing needs to look up a patient to
+// invoice them, but accountants shouldn't edit medical/demographic records.
+const READ_ROLES = [...STAFF_ROLES, Role.ACCOUNTANT];
 
 @Controller("patients")
 @UseGuards(TenantGuard)
@@ -17,11 +20,13 @@ export class PatientsController {
   constructor(private readonly patientsService: PatientsService) {}
 
   @Get()
+  @Roles(...READ_ROLES)
   list(@CurrentUser() user: RequestUser, @Query("search") search?: string) {
     return this.patientsService.list(user.clinicId!, search);
   }
 
   @Get(":id")
+  @Roles(...READ_ROLES)
   findOne(@CurrentUser() user: RequestUser, @Param("id") id: string) {
     return this.patientsService.findOne(user.clinicId!, id);
   }
