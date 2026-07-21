@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: digital-clinic-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: clinic
+      POSTGRES_PASSWORD: clinic
+      POSTGRES_DB: digital_clinic
+    ports:
+      - "5432:5432"
+    volumes:
+      - digital_clinic_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinic -d digital_clinic"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  digital_clinic_pgdata:

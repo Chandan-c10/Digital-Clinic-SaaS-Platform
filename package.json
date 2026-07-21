@@ -1,0 +1,26 @@
+{
+  "name": "digital-clinic-saas",
+  "private": true,
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "db:generate": "pnpm --filter @digital-clinic/database generate",
+    "db:migrate": "pnpm --filter @digital-clinic/database migrate:dev",
+    "db:studio": "pnpm --filter @digital-clinic/database studio",
+    "db:seed": "pnpm --filter @digital-clinic/database seed"
+  },
+  "devDependencies": {
+    "turbo": "^2.1.3",
+    "typescript": "^5.6.3",
+    "prettier": "^3.3.3"
+  }
+}

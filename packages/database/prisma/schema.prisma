@@ -1,0 +1,329 @@
+// Digital Clinic SaaS — Phase 1 (Foundation) data model.
+// Multi-tenant strategy: shared database, shared schema, discriminator column.
+// Every clinic-owned table carries `clinicId` + an index; row-level security
+// policies (prisma/rls.sql) enforce isolation at the database level as a
+// defense-in-depth layer behind the application-level tenant guard.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  SUPER_ADMIN
+  CLINIC_OWNER
+  DOCTOR
+  RECEPTIONIST
+  NURSE
+  ACCOUNTANT
+  PATIENT
+}
+
+enum ClinicPlan {
+  TRIAL
+  BASIC
+  PROFESSIONAL
+  PREMIUM
+  ENTERPRISE
+}
+
+enum ClinicStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELLED
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum AppointmentType {
+  ONLINE
+  WALK_IN
+}
+
+// ---------------------------------------------------------------------------
+// Identity & tenancy
+// ---------------------------------------------------------------------------
+
+/// One row per clinic/doctor tenant. The root of tenant isolation.
+model Clinic {
+  id            String       @id @default(cuid())
+  name          String
+  slug          String       @unique // subdomain: {slug}.platform.com
+  customDomain  String?      @unique
+  plan          ClinicPlan   @default(TRIAL)
+  status        ClinicStatus @default(TRIALING)
+  timezone      String       @default("Asia/Kolkata")
+  trialEndsAt   DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  owner         User?             @relation("ClinicOwner", fields: [ownerId], references: [id])
+  ownerId       String?           @unique
+  users         User[]            @relation("ClinicMembers")
+  profile       ClinicProfile?
+  website       ClinicWebsite?
+  doctors       DoctorProfile[]
+  patients      Patient[]
+  appointments  Appointment[]
+  prescriptions Prescription[]
+
+  @@index([status])
+}
+
+/// Operational details of the clinic itself (address, hours, contact).
+model ClinicProfile {
+  id                String   @id @default(cuid())
+  clinic            Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId          String   @unique
+  addressLine1      String?
+  addressLine2      String?
+  city              String?
+  state             String?
+  country           String?
+  postalCode        String?
+  phone             String?
+  contactEmail      String?
+  workingHours      Json? // e.g. { mon: ["09:00","13:00"], ... }
+  consultationFee   Decimal? @db.Decimal(10, 2)
+  languagesSpoken   String[]
+  socialLinks       Json? // { instagram, facebook, twitter, ... }
+  updatedAt         DateTime @updatedAt
+}
+
+/// Public marketing website configuration rendered at the clinic's
+/// subdomain/custom domain (Website Builder module).
+model ClinicWebsite {
+  id                String   @id @default(cuid())
+  clinic            Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId          String   @unique
+  template          String   @default("default")
+  primaryColor      String   @default("#0f766e")
+  logoUrl           String?
+  heroImageUrl      String?
+  aboutText         String?
+  servicesJson      Json? // [{ title, description, iconUrl }]
+  testimonialsJson  Json? // [{ name, quote, rating }]
+  faqJson           Json? // [{ question, answer }]
+  galleryUrls        String[]
+  googleMapsUrl     String?
+  seoTitle          String?
+  seoDescription    String?
+  isPublished       Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+/// Login identity for every human in the system — super admins, clinic
+/// staff, and patients alike. `clinicId` is null for SUPER_ADMIN and for
+/// PATIENT accounts (a patient can hold appointments at multiple clinics;
+/// their clinical records live on `Patient`, scoped per clinic).
+model User {
+  id                  String    @id @default(cuid())
+  name                String?
+  email               String?   @unique
+  phone               String?   @unique
+  passwordHash        String?
+  role                Role
+  isEmailVerified     Boolean   @default(false)
+  isPhoneVerified     Boolean   @default(false)
+  isTwoFactorEnabled  Boolean   @default(false)
+  twoFactorSecret     String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  clinic              Clinic?   @relation("ClinicMembers", fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId            String?
+  ownedClinic         Clinic?   @relation("ClinicOwner")
+
+  doctorProfile       DoctorProfile?
+  patientRecords      Patient[]        @relation("PatientUser")
+  refreshTokens       RefreshToken[]
+  loginEvents         LoginEvent[]
+
+  @@index([clinicId])
+  @@index([role])
+}
+
+/// Hashed refresh tokens so sessions can be listed/revoked individually
+/// (session management requirement).
+model RefreshToken {
+  id          String    @id @default(cuid())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String
+  tokenHash   String    @unique
+  userAgent   String?
+  ipAddress   String?
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+}
+
+/// Login history for security/audit visibility.
+model LoginEvent {
+  id         String   @id @default(cuid())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  ipAddress  String?
+  userAgent  String?
+  success    Boolean
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Clinical staff
+// ---------------------------------------------------------------------------
+
+/// Professional profile for a User with role DOCTOR, scoped to one clinic.
+model DoctorProfile {
+  id                 String   @id @default(cuid())
+  clinic             Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId           String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId             String   @unique
+  displayName        String
+  qualification      String?
+  specialization      String?
+  registrationNumber String?
+  experienceYears    Int?
+  consultationFee    Decimal? @db.Decimal(10, 2)
+  bio                String?
+  photoUrl           String?
+  languagesSpoken    String[]
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  availabilities     DoctorAvailability[]
+  appointments       Appointment[]
+  prescriptions      Prescription[]
+
+  @@index([clinicId])
+}
+
+/// Weekly recurring availability used to generate bookable slots.
+model DoctorAvailability {
+  id                 String        @id @default(cuid())
+  doctor             DoctorProfile @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId           String
+  dayOfWeek          Int // 0 (Sun) – 6 (Sat)
+  startTime          String // "09:00"
+  endTime            String // "13:00"
+  slotDurationMinutes Int          @default(15)
+  isActive           Boolean       @default(true)
+
+  @@index([doctorId])
+  @@unique([doctorId, dayOfWeek, startTime])
+}
+
+// ---------------------------------------------------------------------------
+// Patients & clinical records
+// ---------------------------------------------------------------------------
+
+/// A patient's clinical record at a specific clinic. `userId` is set once
+/// the patient claims/creates a Patient Portal login; walk-ins can exist
+/// without one.
+model Patient {
+  id              String    @id @default(cuid())
+  clinic          Clinic    @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId        String
+  user            User?     @relation("PatientUser", fields: [userId], references: [id])
+  userId          String?
+  name            String
+  dateOfBirth     DateTime?
+  gender          String?
+  phone           String?
+  email           String?
+  address         String?
+  allergies       String[]
+  medicalHistory  String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  appointments    Appointment[]
+  prescriptions   Prescription[]
+  documents       PatientDocument[]
+
+  @@index([clinicId])
+  @@index([userId])
+}
+
+/// Uploaded reports/documents (Lab Report Management, module L).
+model PatientDocument {
+  id         String   @id @default(cuid())
+  patient    Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patientId  String
+  title      String
+  fileUrl    String
+  fileType   String?
+  uploadedAt DateTime @default(now())
+
+  @@index([patientId])
+}
+
+// ---------------------------------------------------------------------------
+// Appointments
+// ---------------------------------------------------------------------------
+
+model Appointment {
+  id             String            @id @default(cuid())
+  clinic         Clinic            @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId       String
+  patient        Patient           @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patientId      String
+  doctor         DoctorProfile     @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId       String
+  scheduledAt    DateTime
+  durationMinutes Int              @default(15)
+  status         AppointmentStatus @default(PENDING)
+  type           AppointmentType   @default(ONLINE)
+  tokenNumber    Int?
+  reasonForVisit String?
+  notes          String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  prescription   Prescription?
+
+  @@index([clinicId])
+  @@index([doctorId, scheduledAt])
+  @@index([patientId])
+}
+
+/// Digital prescription (basic version for MVP; module M).
+model Prescription {
+  id            String       @id @default(cuid())
+  clinic        Clinic       @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId      String
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+  appointmentId String?      @unique
+  patient       Patient      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patientId     String
+  doctor        DoctorProfile @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId      String
+  medicines     Json // [{ name, dosage, frequency, durationDays, instructions }]
+  notes         String?
+  createdAt     DateTime     @default(now())
+
+  @@index([clinicId])
+  @@index([patientId])
+}
