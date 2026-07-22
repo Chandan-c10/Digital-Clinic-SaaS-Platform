@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, Res, UseGuards } from "@nestjs/common";
 import type { Response } from "express";
+import { Throttle } from "@nestjs/throttler";
 import { InvoiceStatus, Role } from "@digital-clinic/database";
 import { Roles } from "../common/decorators/roles.decorator";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
@@ -63,7 +64,10 @@ export class BillingController {
     });
   }
 
+  // QA/security audit, TC-SEC-08 — see the identical comment on
+  // PatientsController.create.
   @Post()
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   create(@CurrentUser() user: RequestUser, @Body() dto: CreateInvoiceDto) {
     return this.billingService.create(user.clinicId!, user.userId, dto);
   }

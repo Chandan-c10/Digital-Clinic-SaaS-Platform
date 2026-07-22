@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { hashPassword } from "../auth/password.util";
+import { MAX_PAGE_SIZE } from "../common/pagination.util";
 import { STAFF_MANAGEABLE_ROLES } from "./staff-roles";
 import { CreateStaffDto } from "./dto/create-staff.dto";
 import { UpdateStaffDto } from "./dto/update-staff.dto";
@@ -26,6 +27,7 @@ export class StaffService {
       where: { clinicId, role: { in: STAFF_MANAGEABLE_ROLES } },
       select: PUBLIC_SELECT,
       orderBy: { createdAt: "asc" },
+      take: MAX_PAGE_SIZE, // QA/security audit, TC-FUNC-01 / TC-PERF-01
     });
   }
 
@@ -50,7 +52,12 @@ export class StaffService {
         phone: dto.phone,
         role: dto.role,
         passwordHash: hashPassword(dto.password),
-        isEmailVerified: false,
+        // Unlike self-registration (AuthService.registerClinic/registerPatient),
+        // this email was entered by an already-authenticated CLINIC_OWNER
+        // vouching for it, not typed in by an unverified stranger — so login
+        // enforcement of isEmailVerified (QA/security audit, TC-AUTH-02)
+        // doesn't apply the same way here. No verification email is sent.
+        isEmailVerified: true,
       },
       select: PUBLIC_SELECT,
     });

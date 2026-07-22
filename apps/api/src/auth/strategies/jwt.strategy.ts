@@ -17,6 +17,12 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
       secretOrKey: config.getOrThrow<string>("JWT_ACCESS_SECRET"),
+      // QA/security audit, TC-AUTH-08: passport-jwt's defaults already
+      // reject `alg: none` and infer HS* for a string secret (no live
+      // vulnerability) — pinning explicitly is defense-in-depth, not a fix
+      // for a hole, so a future change to how tokens are signed can't
+      // silently widen what's accepted here without this line also changing.
+      algorithms: ["HS256"],
     });
   }
 

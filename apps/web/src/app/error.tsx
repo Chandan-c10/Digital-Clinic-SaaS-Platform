@@ -26,7 +26,10 @@ export default function GlobalError({
   }, [error]);
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center">
+    <main
+      role="alert"
+      className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center"
+    >
       <p className="text-sm font-semibold text-red-600">Something went wrong</p>
       <h1 className="text-2xl font-bold text-slate-900">We couldn&rsquo;t load this page</h1>
       <p className="max-w-md text-slate-600">

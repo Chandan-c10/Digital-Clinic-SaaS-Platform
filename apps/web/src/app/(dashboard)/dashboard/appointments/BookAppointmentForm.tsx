@@ -123,7 +123,11 @@ export function BookAppointmentForm({ doctors, patients }: Props) {
       <div>
         <span className="mb-2 block text-sm font-medium text-slate-700">Available slots</span>
         {loadingSlots && <p className="text-sm text-slate-500">Loading…</p>}
-        {!loadingSlots && slotsError && <p className="text-sm text-red-600">{slotsError}</p>}
+        {!loadingSlots && slotsError && (
+          <p role="alert" className="text-sm text-red-600">
+            {slotsError}
+          </p>
+        )}
         {!loadingSlots && !slotsError && slots.length === 0 && (
           <p className="text-sm text-slate-500">No open slots for this day.</p>
         )}
@@ -132,8 +136,9 @@ export function BookAppointmentForm({ doctors, patients }: Props) {
             <button
               key={slot}
               type="button"
+              aria-pressed={selectedSlot === slot}
               onClick={() => setSelectedSlot(slot)}
-              className={`rounded-md border px-3 py-1.5 text-sm ${
+              className={`rounded-md border px-3 py-1.5 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 ${
                 selectedSlot === slot
                   ? "border-brand-600 bg-brand-50 text-brand-700"
                   : "border-slate-300 text-slate-600 hover:bg-slate-50"
@@ -145,7 +150,11 @@ export function BookAppointmentForm({ doctors, patients }: Props) {
         </div>
       </div>
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && (
+        <p role="alert" className="text-sm text-red-600">
+          {error}
+        </p>
+      )}
 
       <div className="flex gap-2">
         <Button type="submit" disabled={submitting}>

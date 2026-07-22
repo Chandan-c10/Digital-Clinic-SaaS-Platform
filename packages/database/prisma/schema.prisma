@@ -69,7 +69,16 @@ enum PaymentMethod {
   CARD
   UPI
   BANK_TRANSFER
+  INSURANCE
   OTHER
+}
+
+enum InsuranceClaimStatus {
+  SUBMITTED
+  APPROVED
+  PARTIALLY_APPROVED
+  REJECTED
+  PAID
 }
 
 enum NotificationChannel {
@@ -98,6 +107,15 @@ enum InventoryTransactionType {
   ADJUSTED
   EXPIRED
   DAMAGED
+}
+
+/// QA/security audit (2026-07-22), TC-AUTH-01 / TC-AUTH-02: one shared
+/// hashed-token model for both flows since they're structurally identical
+/// (opaque random token, hashed at rest, expiring, single-use) — see
+/// RefreshToken for the same pattern already used for sessions.
+enum VerificationTokenPurpose {
+  RESET_PASSWORD
+  VERIFY_EMAIL
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +150,10 @@ model Clinic {
   branches      Branch[]
   inventoryItems InventoryItem[]
   inventoryTransactions InventoryTransaction[]
+  insuranceProviders InsuranceProvider[]
+  insurancePolicies  InsurancePolicy[]
+  insuranceClaims    InsuranceClaim[]
+  auditLogs      AuditLog[]
 
   @@index([status])
 }
@@ -227,8 +249,6 @@ model User {
   role                Role
   isEmailVerified     Boolean   @default(false)
   isPhoneVerified     Boolean   @default(false)
-  isTwoFactorEnabled  Boolean   @default(false)
-  twoFactorSecret     String?
   /// Soft-disable switch for staff accounts (module S, Staff Management).
   /// Login and token refresh are both rejected while false; the account
   /// and its history are kept, unlike a delete.
@@ -249,9 +269,12 @@ model User {
   patientRecords      Patient[]        @relation("PatientUser")
   refreshTokens       RefreshToken[]
   loginEvents         LoginEvent[]
+  verificationTokens  VerificationToken[]
+  auditLogsActedBy    AuditLog[]
   invoicesCreated     Invoice[]        @relation("InvoiceCreatedBy")
   paymentsRecorded    Payment[]        @relation("PaymentRecordedBy")
   inventoryTransactionsPerformed InventoryTransaction[] @relation("InventoryTransactionPerformedBy")
+  insuranceClaimsSubmitted InsuranceClaim[] @relation("InsuranceClaimSubmittedBy")
 
   @@index([clinicId])
   @@index([role])
@@ -285,6 +308,46 @@ model LoginEvent {
   createdAt  DateTime @default(now())
 
   @@index([userId])
+}
+
+/// Password reset + email verification (QA/security audit, TC-AUTH-01 /
+/// TC-AUTH-02). Same shape as RefreshToken deliberately: the raw token is
+/// emailed to the user and never stored — only its SHA-256 hash is, so a
+/// leaked database doesn't hand out usable tokens. Single-use (`usedAt`)
+/// and short-lived (`expiresAt`).
+model VerificationToken {
+  id         String                   @id @default(cuid())
+  user       User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  tokenHash  String                   @unique
+  purpose    VerificationTokenPurpose
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime                 @default(now())
+
+  @@index([userId, purpose])
+}
+
+/// General-purpose audit trail (QA/security audit, 2026-07-22 — TC-SEC-01 /
+/// TC-DB-04). Not retroactively wired into every mutation across the app —
+/// today it's only emitted by Patient soft-delete/restore, the highest-value
+/// case (undoing/tracing a "deletion" of clinical records). Extend the call
+/// sites in AuditLogService as each module's own trail becomes worth having,
+/// rather than instrumenting everything speculatively in one pass.
+model AuditLog {
+  id         String   @id @default(cuid())
+  clinic     Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId   String
+  actor      User     @relation(fields: [actorId], references: [id])
+  actorId    String
+  action     String // e.g. "PATIENT_SOFT_DELETED", "PATIENT_RESTORED"
+  entityType String // e.g. "Patient"
+  entityId   String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([clinicId])
+  @@index([entityType, entityId])
 }
 
 // ---------------------------------------------------------------------------
@@ -337,11 +400,12 @@ model DoctorAvailability {
   @@index([branchId])
   // Note: Postgres treats NULL as distinct from NULL in unique constraints,
   // so this doesn't actually block duplicate (doctorId, dayOfWeek, startTime)
-  // rows when branchId is null (single-branch clinics). Not tightened to a
-  // partial index for that case — DoctorsService.setAvailability always
-  // fully replaces a doctor's rows in one deleteMany+createMany rather than
-  // inserting incrementally, so the practical risk is a caller submitting
-  // duplicate rows in one request, not a race between separate requests.
+  // rows when branchId is null (single-branch clinics) — DoctorsService
+  // .setAvailability rejects duplicate slots in application code instead
+  // (BadRequestException), since it's the only place these rows are ever
+  // written (a full deleteMany+createMany replace, never an incremental
+  // insert) and can dedupe with a normal-equality key that treats null as
+  // equal to null, unlike the DB constraint.
   @@unique([doctorId, branchId, dayOfWeek, startTime])
 }
 
@@ -352,6 +416,17 @@ model DoctorAvailability {
 /// A patient's clinical record at a specific clinic. `userId` is set once
 /// the patient claims/creates a Patient Portal login; walk-ins can exist
 /// without one.
+///
+/// `isActive` (QA/security audit, 2026-07-22, TC-SEC-01/TC-DB-01): patients
+/// are soft-deleted, not hard-deleted — the one model that used to be a true
+/// `prisma.patient.delete()`, cascading to permanently destroy every linked
+/// Appointment/Prescription/Payment/etc. with no way back and no record it
+/// happened. Now mirrors the isActive pattern already used for staff/
+/// branches/inventory items: `PatientsService.remove()` flips this to
+/// false (logged to AuditLog) instead, `restore()` flips it back, and
+/// history is never lost. A genuine hard delete (e.g. a data-subject
+/// erasure request) would be a separate, explicitly-confirmed operation —
+/// not the default of a single DELETE call — and isn't built here.
 model Patient {
   id              String    @id @default(cuid())
   clinic          Clinic    @relation(fields: [clinicId], references: [id], onDelete: Cascade)
@@ -366,6 +441,7 @@ model Patient {
   address         String?
   allergies       String[]
   medicalHistory  String?
+  isActive        Boolean   @default(true)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
@@ -373,12 +449,21 @@ model Patient {
   prescriptions   Prescription[]
   documents       PatientDocument[]
   invoices        Invoice[]
+  insurancePolicies InsurancePolicy[]
 
   @@index([clinicId])
   @@index([userId])
 }
 
 /// Uploaded reports/documents (Lab Report Management, module L).
+///
+/// Schema-only today (QA/security audit, 2026-07-22, TC-FUNC-03): no upload
+/// endpoint, storage client, or writer exists anywhere in apps/api — this
+/// table is always empty. The matching STORAGE_* env vars were removed from
+/// .env.example for the same reason (dead config implying a working
+/// feature). Needs a real object-storage vendor account (S3/R2/etc.) to
+/// build for real — same "can't fake it, flag it" rule already applied to
+/// the payment gateway and SMS/WhatsApp providers, see README § Security.
 model PatientDocument {
   id         String   @id @default(cuid())
   patient    Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
@@ -444,6 +529,13 @@ model Prescription {
   medicines     Json // [{ name, dosage, frequency, durationDays, instructions }]
   notes         String?
   createdAt     DateTime     @default(now())
+  /// Set once every line has been matched to an InventoryItem and dispensed
+  /// (module Pharmacy — see PharmacyService.dispense). Null = still pending
+  /// at the pharmacy counter. Deliberately a single timestamp, not a
+  /// partial-dispense state machine — see the README note on why.
+  dispensedAt   DateTime?
+
+  dispenses     InventoryTransaction[]
 
   @@index([clinicId])
   @@index([patientId])
@@ -487,6 +579,7 @@ model Invoice {
   updatedAt      DateTime      @updatedAt
 
   payments       Payment[]
+  insuranceClaims InsuranceClaim[]
 
   @@unique([clinicId, invoiceNumber])
   @@index([clinicId])
@@ -600,6 +693,12 @@ model InventoryTransaction {
   type          InventoryTransactionType
   quantity      Int
   reason        String?
+  /// Set when this DISPENSED transaction is a pharmacy dispense against a
+  /// prescription (module Pharmacy), rather than a manual stock movement —
+  /// null for everything else (RECEIVED, ADJUSTED, EXPIRED, DAMAGED, or a
+  /// DISPENSED not tied to a prescription, e.g. used-in-clinic supplies).
+  prescription   Prescription?            @relation(fields: [prescriptionId], references: [id])
+  prescriptionId String?
   performedBy   User                      @relation("InventoryTransactionPerformedBy", fields: [performedById], references: [id])
   performedById String
   createdAt     DateTime                  @default(now())
@@ -607,4 +706,76 @@ model InventoryTransaction {
   @@index([clinicId])
   @@index([itemId])
   @@index([branchId])
+  @@index([prescriptionId])
+}
+
+// ---------------------------------------------------------------------------
+// Insurance
+// ---------------------------------------------------------------------------
+
+/// An insurance company the clinic works with — the catalog, not a specific
+/// patient's coverage (see InsurancePolicy).
+model InsuranceProvider {
+  id           String            @id @default(cuid())
+  clinic       Clinic            @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId     String
+  name         String
+  contactEmail String?
+  contactPhone String?
+  isActive     Boolean           @default(true)
+  createdAt    DateTime          @default(now())
+
+  policies     InsurancePolicy[]
+
+  @@index([clinicId])
+}
+
+/// A specific patient's coverage under a provider.
+model InsurancePolicy {
+  id           String            @id @default(cuid())
+  clinic       Clinic            @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId     String
+  patient      Patient           @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patientId    String
+  provider     InsuranceProvider @relation(fields: [providerId], references: [id])
+  providerId   String
+  policyNumber String
+  memberName   String?
+  validFrom    DateTime?
+  validTo      DateTime?
+  isActive     Boolean           @default(true)
+  createdAt    DateTime          @default(now())
+
+  claims       InsuranceClaim[]
+
+  @@index([clinicId])
+  @@index([patientId])
+}
+
+/// A claim filed against an Invoice under a Policy. Reaching PAID doesn't
+/// itself move money — InsuranceService.respondToClaim calls the existing
+/// BillingService.recordPayment (method: INSURANCE) to actually apply it to
+/// the invoice's balance, reusing Billing's balance/status-transition logic
+/// rather than duplicating it here (same "compose the two things that
+/// already exist" pattern as Pharmacy over Prescription + Inventory).
+model InsuranceClaim {
+  id             String               @id @default(cuid())
+  clinic         Clinic               @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  clinicId       String
+  invoice        Invoice              @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoiceId      String
+  policy         InsurancePolicy      @relation(fields: [policyId], references: [id])
+  policyId       String
+  status         InsuranceClaimStatus @default(SUBMITTED)
+  claimedAmount  Decimal              @db.Decimal(10, 2)
+  approvedAmount Decimal?             @db.Decimal(10, 2)
+  notes          String?
+  submittedBy    User                 @relation("InsuranceClaimSubmittedBy", fields: [submittedById], references: [id])
+  submittedById  String
+  submittedAt    DateTime             @default(now())
+  respondedAt    DateTime?
+
+  @@index([clinicId])
+  @@index([invoiceId])
+  @@index([policyId])
 }

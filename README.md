@@ -71,8 +71,7 @@ contents below.
     scoped, not clinic-scoped — see
     [Architecture § Patient Portal](#5-architecture). Not built: PDF download
     or online payment from the portal.
-- **Phase 3 — Enterprise** (in progress): inventory, pharmacy, insurance,
-  advanced analytics remain.
+- **Phase 3 — Enterprise** (done, all 5 items):
   - **Multi-branch** (done): opt-in, non-breaking — see
     [Architecture § Multi-branch](#5-architecture). `Branch` model, optional
     `branchId` on availability/appointments/invoices/prescriptions/staff,
@@ -84,8 +83,24 @@ contents below.
     optional per-branch stock pools. `/dashboard/inventory`, API:
     `apps/api/src/inventory/`. No purchase orders/supplier management —
     stock tracking only.
+  - **Pharmacy** (done): dispensing a prescription against Inventory —
+    not a new domain, a workflow over Prescription + Inventory (see
+    [Architecture § Pharmacy](#5-architecture)). `/dashboard/pharmacy`, API:
+    `apps/api/src/pharmacy/`. No new `PHARMACIST` role — reuses the same
+    staff who already handle stock.
+  - **Insurance** (done): providers, per-patient policies, and claims filed
+    against invoices — claims settle *through* Billing
+    (`BillingService.recordPayment`, method `INSURANCE`), not around it
+    (see [Architecture § Insurance](#5-architecture)). `/dashboard/insurance`,
+    API: `apps/api/src/insurance/`.
+  - **Advanced analytics** (done): doctor performance, popular services,
+    patient growth trend, patient retention — extends the existing Reports
+    endpoints rather than a separate module (see
+    [Architecture § Advanced analytics](#5-architecture)).
+    `/dashboard/reports/advanced`, same API: `apps/api/src/reports/`.
 - **Phase 4 — AI**: AI assistant, voice notes, AI summaries, chatbot, predictive
-  analytics.
+  analytics. Needs a real AI provider account/API key not yet configured —
+  same situation as the payment gateway and SMS provider.
 - **Cross-platform (web + mobile)** — not a phase with a fixed slot, a standing
   requirement layered across all of them: the platform is meant to grow into 7
   client applications (public website, doctor dashboard, patient portal, super
@@ -241,6 +256,37 @@ Single shared database, discriminator column: every clinic-owned table carries
   `apps/web/src/lib/session-cookies.ts` — see the comment there about keeping
   them in sync with `JWT_ACCESS_EXPIRES_IN`/`JWT_REFRESH_EXPIRES_IN` if those
   are changed from their defaults.
+- **Password reset + email verification** (QA/security audit, 2026-07-22,
+  TC-AUTH-01/02): one shared `VerificationToken` model for both — same
+  hashed-random-token shape as `RefreshToken` (opaque, SHA-256 at rest,
+  expiring, single-use), distinguished by a `purpose` enum so one table
+  covers both flows instead of two near-identical ones. `POST
+  /auth/forgot-password` and `/resend-verification` always return the same
+  generic response whether or not the email is registered — see the code
+  comment on `AuthController` for why that's load-bearing, not incidental.
+  Self-registration (`registerClinic`/`registerPatient`) sends a
+  verification email and starts `isEmailVerified: false`; `login()` now
+  actually enforces it (previously set but never read — TC-AUTH-02).
+  Staff/doctor accounts created *by* a clinic owner start pre-verified
+  instead — the owner is vouching for that email, unlike a stranger
+  self-registering — so this doesn't add a verification step to onboarding
+  a new team member. Resetting a password revokes every existing
+  `RefreshToken` for that account, and rejects setting the same password
+  back.
+- **Per-account login lockout** (TC-AUTH-04): after 5 failed attempts on
+  one account within 15 minutes, further logins are rejected — including
+  with the *correct* password — until the window ages out. Computed from
+  `LoginEvent` (already recorded every attempt) rather than a new counter
+  column. Complements, doesn't replace, `ThrottlerGuard`'s IP-based
+  `/auth/login` throttle (5/min): the IP throttle stops one source hitting
+  many accounts, this stops many sources hitting one account.
+- 2FA schema scaffolding (`User.isTwoFactorEnabled`/`twoFactorSecret`) was
+  removed (TC-AUTH-03) rather than built out — it had zero implementation
+  behind it (no TOTP generation, no login-flow check), which the audit
+  flagged as worse than simply absent: a reader of the data model could
+  reasonably assume MFA was available when it provided zero protection.
+  Real TOTP-based MFA is a substantial standalone feature, not something to
+  half-build alongside 23 other findings in one pass.
 
 ### Roles
 
@@ -250,6 +296,39 @@ for `RECEPTIONIST` / `NURSE` / `ACCOUNTANT` are managed through the `staff`
 module; `DOCTOR` accounts go through the `doctors` module instead because
 creating one also creates a `DoctorProfile` — routing doctor creation through
 `staff` as well would produce a `User` with no profile.
+
+### Patients
+
+- **Soft delete, not hard delete** (QA/security audit, 2026-07-22,
+  TC-SEC-01/TC-DB-01). `DELETE /patients/:id` used to call
+  `prisma.patient.delete()` directly — every clinically/financially linked
+  model (`Appointment`, `Prescription`, `Payment`, `PatientDocument`, …) is
+  `onDelete: Cascade`, so one call permanently erased a patient's whole
+  history with nothing logged. Now mirrors the `isActive` pattern already
+  used for staff/branches/inventory items: `remove()` flips `isActive` to
+  `false` (idempotent — a no-op, not an error, if already inactive) and
+  `PATCH /patients/:id/restore` flips it back. A true hard delete (e.g. a
+  data-subject erasure request) would need to be a separate, explicitly
+  confirmed operation — not built here.
+- **Every soft-delete/restore is logged to `AuditLog`** (TC-DB-04) — a new
+  general-purpose audit trail (`clinicId`, `actorId`, `action`,
+  `entityType`, `entityId`, `metadata`), viewable at `GET /audit-log`
+  (CLINIC_OWNER only). Deliberately not retrofitted into every mutation
+  across the app in this pass — Patient soft-delete/restore is the one call
+  site today, chosen because it's the highest-value case (undoing/tracing a
+  "deletion" of clinical records). Extend `AuditLogService.record()` call
+  sites as other modules' trails become worth having.
+- **Paginated for real** (TC-FUNC-01/TC-PERF-01) — `GET /patients` accepts
+  `page`/`pageSize` and returns a bounded array with the total count on an
+  `X-Total-Count` response header (not a `{data, total}` body shape, to
+  avoid breaking every other existing caller of `apiFetch<Patient[]>(...)`
+  — see the doc comment on `apps/api/src/common/pagination.util.ts`).
+  `/dashboard/patients` is the one page with real pager controls
+  (`components/ui/Pager.tsx`) plus a "show deleted patients" toggle; seven
+  other list endpoints (appointments, invoices, staff, notifications,
+  inventory, prescriptions, insurance claims/providers/policies) are now
+  bounded the same way `NotificationsService.list()` always was
+  (`take: 200`, no `skip`) but don't have page-through UI yet.
 
 ### Billing
 
@@ -357,21 +436,34 @@ creating one also creates a `DoctorProfile` — routing doctor creation through
   (`ReportsService`) go through `Payment`'s `Invoice` relation
   (`where: { invoice: { branchId } }`) instead of denormalizing the column
   onto `Payment` too.
-- Known gap, called out in a schema comment: Postgres treats `NULL` as
-  distinct from `NULL` in unique constraints, so
+- Postgres treats `NULL` as distinct from `NULL` in unique constraints, so
   `DoctorAvailability`'s `@@unique([doctorId, branchId, dayOfWeek,
-  startTime])` doesn't actually block duplicate rows when `branchId` is
-  null (single-branch clinics). Not tightened further — `setAvailability`
-  always fully replaces a doctor's availability in one
-  `deleteMany`+`createMany` rather than inserting incrementally, so the
-  practical risk is a caller submitting duplicate rows in one request, not
-  a race between separate requests.
-- No dedicated UI exists yet for doctors to set per-branch availability —
-  there's no doctor-management page in `apps/web` at all (a pre-existing
-  gap from Phase 1, not introduced here). `/dashboard/branches` (branch
-  CRUD) and the `branchId` field on `POST /doctors/:id/availability` are
-  both real and usable via the API today; wiring a UI for the latter is a
-  follow-up.
+  startTime])` can't itself block duplicate rows when `branchId` is null
+  (single-branch clinics). Fixed at the application layer instead:
+  `DoctorsService.setAvailability` rejects a submitted slot list containing
+  a duplicate `(branchId, dayOfWeek, startTime)` with a 400 before writing
+  anything — it's the only place these rows are ever written (a full
+  `deleteMany`+`createMany` replace, never an incremental insert), so this
+  fully closes the gap without needing a partial-index migration.
+- **Doctor management UI**: `/dashboard/doctors` — list, create, edit
+  profile, and a weekly-availability editor (`/dashboard/doctors/:id`).
+  Saving availability replaces the doctor's whole schedule in one request,
+  matching `setAvailability`'s replace semantics — the form is pre-filled
+  with the doctor's current week rather than needing a separate view/edit
+  mode. Per-slot `branchId` only shows once the clinic has at least one
+  branch, same "don't ask for what doesn't apply yet" rule as
+  `/dashboard/branches`.
+- **`Branch.isActive` enforcement was a promise the code didn't keep until
+  now.** `BranchesService.setStatus`'s doc comment always said deactivating
+  "stops it being offered for new availability/bookings... enforced by the
+  modules that read `Branch.isActive` when listing options" — but no module
+  actually did. The availability editor's branch dropdown is the first real
+  one: it now filters to active branches, while still showing a slot's
+  *already-assigned* branch even if it's since been deactivated (labeled
+  "(deactivated)") rather than silently swapping the visible selection out
+  from under a value that didn't change. `GET /branches` itself still
+  returns every branch regardless of status — deactivation was never meant
+  to hide a branch from management, only from being offered fresh.
 
 ### Inventory
 
@@ -398,6 +490,84 @@ creating one also creates a `DoctorProfile` — routing doctor creation through
 - No purchase orders, supplier management, or automatic reorder
   notifications — this is stock *tracking* (what do we have, is anything
   low), not procurement. Out of scope for this pass.
+
+### Pharmacy
+
+- **Not a separate domain — a workflow over Prescription + Inventory.**
+  Dispensing writes `DISPENSED` `InventoryTransaction` rows (via
+  `InventoryService.recordTransaction`, reusing its stock/branch validation
+  rather than duplicating it) tagged with an internal `prescriptionId` param
+  not exposed on the public `/inventory` DTO, then stamps
+  `Prescription.dispensedAt`.
+- **Single timestamp, not a partial-dispense state machine.** A
+  prescription is either pending (`dispensedAt` null) or fully dispensed —
+  there's no "dispensed 2 of 3 medicines" state. `PharmacyService.dispense`
+  takes every line in one call.
+- **No new `PHARMACIST` role.** Dispensing reuses the same roles that
+  already handle physical stock in Inventory (CLINIC_OWNER, NURSE,
+  RECEPTIONIST) rather than adding a role that would ripple through Staff
+  Management, nav visibility, etc. for what's a small-clinic-scale feature.
+- **Multi-line dispense is atomic.** `PharmacyService.dispense` wraps every
+  line's existence/stock check + write in one `prisma.$transaction`, passed
+  through to `InventoryService.recordTransaction` via an optional trailing
+  `db` parameter (`PrismaService | Prisma.TransactionClient`, defaulting to
+  the ambient `PrismaService` for every other caller so this is additive,
+  not a breaking signature change). A concurrent request against the same
+  item can no longer interleave between one line's check and its write —
+  Postgres serializes the two transactions instead of the application
+  racing itself.
+
+### Insurance
+
+- **Claims settle through Billing, not around it.** Marking a claim `PAID`
+  calls the existing `BillingService.recordPayment` with
+  `method: INSURANCE` (a new `PaymentMethod` value) rather than adjusting
+  `Invoice.amountPaid` directly — this reuses Billing's balance/status
+  transition logic (and its own remaining-balance check) instead of a
+  second, parallel implementation of "apply money to an invoice." Same
+  compose-don't-duplicate pattern as Pharmacy over Inventory.
+- `InsuranceProvider` (the catalog of insurers a clinic works with) and
+  `InsurancePolicy` (one patient's specific coverage) are separate models —
+  a provider exists once per clinic, a policy exists once per
+  patient-provider pair.
+- A claim is validated against its invoice at filing time: the policy must
+  belong to the *same patient* as the invoice (not just the same clinic —
+  filing someone else's policy against your invoice is a real integrity
+  bug, not just a tenant-isolation one), and `claimedAmount` can't exceed
+  the invoice total.
+- `respondToClaim` requires `approvedAmount` for every status except
+  `REJECTED`, and refuses to respond to a claim that's already `PAID`
+  (claims settle once, like invoices don't get double-invoiced).
+
+### Advanced analytics
+
+- **Lives inside `ReportsService`/`ReportsController`, not a separate
+  module.** It's the same domain (reporting over existing data) as the
+  Phase 2 Reports endpoints, just deeper — `resolveRange`/`dayKey` were
+  extracted to `apps/api/src/reports/date-range.util.ts` so both the
+  original four endpoints and these four share the exact same date-range
+  and day-bucketing logic instead of two copies drifting apart.
+- **Doctor performance** revenue is attributed via `Invoice.amountPaid` on
+  invoices linked to that doctor's appointments
+  (`Invoice.appointmentId` → `Appointment.doctorId`) — `Payment` has no
+  doctor link at all, so this is a practical measure ("how much did this
+  doctor generate"), not an audited financial attribution.
+- **Popular services** aggregates `Invoice.lineItems` (a JSON blob, not a
+  normalized table) by `description` in JS after one ranged fetch — same
+  reasoning as `revenue()`/`appointmentTrend()` for not reaching for raw
+  SQL at this data volume.
+- **Patient retention** defines "returning" as a patient seen in the
+  requested window who was *also* seen at least once before it started.
+  Not branch-filterable, like `overview()`'s `newPatients` — `Patient`
+  isn't branch-scoped, and retention is a whole-clinic behavior question,
+  not a per-location one.
+- Frontend: `/dashboard/reports/advanced`, linked from the main Reports
+  page rather than a separate top-level nav item (same reasoning as the
+  backend — it's more Reports, not a new section). The daily bar chart
+  (patient growth) reuses a new shared `components/ui/BarChart.tsx`,
+  extracted from the Reports page's original revenue chart so this doesn't
+  duplicate the same chart code — the "extend `components/ui/` rather than
+  one-off styling" convention actually paying off with a second caller.
 
 ### API-first design (for future web + mobile clients)
 
@@ -436,11 +606,15 @@ Base URL: `http://localhost:4000/api/v1`. All routes except those marked
 
 | Method | Path | Access | Body |
 |---|---|---|---|
-| POST | `/auth/register-clinic` | public | `{ clinicName, slug, ownerName, email, password }` |
-| POST | `/auth/register-patient` | public | `{ name, email, phone?, password }` — creates a Patient Portal login (`Role.PATIENT`, `clinicId: null`); does not auto-link any existing walk-in `Patient` record |
-| POST | `/auth/login` | public, throttled 5/min | `{ email, password }` — same endpoint for staff and patients, role decides what the token can do |
+| POST | `/auth/register-clinic` | public, throttled 10/min | `{ clinicName, slug, ownerName, email, password }` — sends a verification email |
+| POST | `/auth/register-patient` | public, throttled 10/min | `{ name, email, phone?, password }` — creates a Patient Portal login (`Role.PATIENT`, `clinicId: null`); does not auto-link any existing walk-in `Patient` record; sends a verification email |
+| POST | `/auth/login` | public, throttled 5/min | `{ email, password }` — same endpoint for staff and patients, role decides what the token can do; rejects if the account isn't email-verified or has 5+ recent failed attempts (see [Architecture § Auth](#5-architecture)) |
 | POST | `/auth/refresh` | public | `{ refreshToken }` |
 | POST | `/auth/logout` | public | `{ refreshToken }` |
+| POST | `/auth/forgot-password` | public, throttled 5/min | `{ email }` — always 200 with the same generic message, registered or not |
+| POST | `/auth/reset-password` | public | `{ token, newPassword }` — revokes every existing session on success |
+| POST | `/auth/verify-email` | public | `{ token }` |
+| POST | `/auth/resend-verification` | public, throttled 5/min | `{ email }` — always 200 with the same generic message |
 
 ### Clinics (`/clinics`)
 
@@ -459,19 +633,28 @@ Base URL: `http://localhost:4000/api/v1`. All routes except those marked
 | GET | `/doctors/:id` | any authenticated staff | — |
 | POST | `/doctors` | CLINIC_OWNER | `{ email, password, displayName, qualification?, specialization?, registrationNumber?, experienceYears?, consultationFee?, bio?, languagesSpoken? }` |
 | PATCH | `/doctors/:id` | CLINIC_OWNER, DOCTOR | partial of the above minus `email`/`password` |
-| PATCH | `/doctors/:id/availability` | CLINIC_OWNER, DOCTOR | `{ slots: [{ dayOfWeek, startTime, endTime, slotDurationMinutes, branchId? }] }` — `branchId` optional, validated to belong to this clinic if given (module Z, see [Architecture § Multi-branch](#5-architecture)) |
+| PATCH | `/doctors/:id/availability` | CLINIC_OWNER, DOCTOR | `{ slots: [{ dayOfWeek, startTime, endTime, slotDurationMinutes, branchId? }] }` — `branchId` optional, validated to belong to this clinic if given (module Z, see [Architecture § Multi-branch](#5-architecture)); replaces the doctor's whole schedule (min 1 slot) and 400s on a duplicate `(branchId, dayOfWeek, startTime)` within the same request |
 
 ### Patients (`/patients`)
 
 | Method | Path | Access | Body |
 |---|---|---|---|
-| GET | `/patients?search=` | CLINIC_OWNER, DOCTOR, RECEPTIONIST, NURSE, ACCOUNTANT (read-only) | — |
+| GET | `/patients?search=&includeInactive=&page=&pageSize=` | CLINIC_OWNER, DOCTOR, RECEPTIONIST, NURSE, ACCOUNTANT (read-only) | — bounded array, total count on the `X-Total-Count` response header (see [Architecture § Patients](#5-architecture)) |
 | GET | `/patients/:id` | same | — |
-| POST | `/patients` | CLINIC_OWNER, DOCTOR, RECEPTIONIST, NURSE | `{ name, phone?, email?, gender?, dateOfBirth?, address?, allergies?, medicalHistory? }` |
+| POST | `/patients` | CLINIC_OWNER, DOCTOR, RECEPTIONIST, NURSE, throttled 20/min | `{ name, phone?, email?, gender?, dateOfBirth?, address?, allergies?, medicalHistory? }` |
 | PATCH | `/patients/:id` | same | partial of the above |
-| DELETE | `/patients/:id` | CLINIC_OWNER | — |
+| DELETE | `/patients/:id` | CLINIC_OWNER | soft delete — sets `isActive: false`, logged to `AuditLog`, idempotent |
+| PATCH | `/patients/:id/restore` | CLINIC_OWNER | — sets `isActive: true`, logged to `AuditLog` |
 
 ACCOUNTANT's GET-only access was added for Billing — invoicing needs to look up a patient, but accountants shouldn't edit medical/demographic records.
+
+### Audit log (`/audit-log`)
+
+| Method | Path | Access | Body |
+|---|---|---|---|
+| GET | `/audit-log` | CLINIC_OWNER | — most recent 200 entries, newest first, actor name/email included |
+
+See [Architecture § Patients](#5-architecture) for what's logged today (Patient soft-delete/restore only — not every mutation).
 
 ### Appointments (`/appointments`)
 
@@ -495,7 +678,7 @@ roles — `DOCTOR` accounts are not manageable here (see [Architecture](#5-archi
 | GET | `/staff` | — |
 | GET | `/staff/:id` | — |
 | GET | `/staff/:id/activity` | — (last 50 `LoginEvent` rows) |
-| POST | `/staff` | `{ name, email, password, phone?, role: RECEPTIONIST\|NURSE\|ACCOUNTANT }` |
+| POST | `/staff` (throttled 20/min) | `{ name, email, password, phone?, role: RECEPTIONIST\|NURSE\|ACCOUNTANT }` — starts pre-verified (see [Architecture § Auth](#5-architecture)) |
 | PATCH | `/staff/:id` | partial `{ name?, phone?, role? }` |
 | PATCH | `/staff/:id/status` | `{ isActive: boolean }` — deactivating revokes live refresh tokens immediately |
 
@@ -528,7 +711,7 @@ stubbed out.
 | GET | `/billing/invoices?patientId=&status=` | read roles | — |
 | GET | `/billing/invoices/:id` | read roles | — includes `payments[]` |
 | GET | `/billing/invoices/:id/pdf` | read roles | — streams a PDF |
-| POST | `/billing/invoices` | write roles | `{ patientId, appointmentId?, lineItems: [{ description, quantity, unitPrice }], discountAmount?, taxAmount?, notes? }` |
+| POST | `/billing/invoices` | write roles, throttled 20/min | `{ patientId, appointmentId?, lineItems: [{ description, quantity, unitPrice }], discountAmount?, taxAmount?, notes? }` — every quantity/amount field bounded (TC-FUNC-02), `NewInvoiceForm` pre-validates discount+tax against subtotal client-side before submitting (TC-EDGE-02) |
 | POST | `/billing/invoices/:id/payments` | write roles | `{ amount, method: CASH\|CARD\|UPI\|BANK_TRANSFER\|OTHER, reference? }` — rejects amounts exceeding the remaining balance |
 | PATCH | `/billing/invoices/:id/cancel` | CLINIC_OWNER, ACCOUNTANT | — only an `UNPAID` invoice can be cancelled |
 
@@ -549,6 +732,10 @@ CLINIC_OWNER, ACCOUNTANT only, read-only. All three accept optional
 | GET | `/reports/overview` | `{ range, totalRevenue, totalInvoiced, outstandingAmount, totalAppointments, appointmentsByStatus, newPatients }` |
 | GET | `/reports/revenue` | `[{ date, amount }]` — daily, from recorded `Payment`s |
 | GET | `/reports/appointments` | `[{ date, count }]` — daily appointment volume |
+| GET | `/reports/doctor-performance` | `[{ doctorId, doctorName, totalAppointments, appointmentsByStatus, revenue }]` — supports `?branchId=` |
+| GET | `/reports/popular-services` | `[{ description, count, revenue }]`, sorted by revenue desc — supports `?branchId=` |
+| GET | `/reports/patient-growth` | `[{ date, count }]` — daily new-patient series (not `?branchId=` filterable, see [Architecture § Advanced analytics](#5-architecture)) |
+| GET | `/reports/patient-retention` | `{ range, totalPatients, returningPatients, newPatients, retentionRate }` — not `?branchId=` filterable |
 
 ### Prescriptions (`/prescriptions`)
 
@@ -590,6 +777,35 @@ instead of a JWT, and not tenant-scoped (runs across every clinic).
 | Method | Path | Access | Body |
 |---|---|---|---|
 | POST | `/internal/cron/appointment-reminders` | header `x-cron-secret: <CRON_SECRET>` | — none; returns `{ sent, skipped }` |
+
+### Pharmacy (`/pharmacy`)
+
+Read: CLINIC_OWNER, DOCTOR, NURSE, RECEPTIONIST. Dispense:
+CLINIC_OWNER, NURSE, RECEPTIONIST. See
+[Architecture § Pharmacy](#5-architecture).
+
+| Method | Path | Access | Body |
+|---|---|---|---|
+| GET | `/pharmacy/prescriptions/pending` | read roles | — prescriptions with `dispensedAt: null` |
+| GET | `/pharmacy/prescriptions/:id` | read roles | — includes dispense history |
+| POST | `/pharmacy/prescriptions/:id/dispense` | dispense roles | `{ items: [{ inventoryItemId, quantity }], branchId? }` — 404 on an unknown item, 400 if already dispensed or stock is insufficient |
+
+### Insurance (`/insurance`)
+
+Providers/policies/claim filing: CLINIC_OWNER, RECEPTIONIST, ACCOUNTANT
+(provider *creation* is CLINIC_OWNER only). Responding to a claim:
+CLINIC_OWNER, ACCOUNTANT. See [Architecture § Insurance](#5-architecture).
+
+| Method | Path | Access | Body |
+|---|---|---|---|
+| GET | `/insurance/providers` | manage roles | — |
+| POST | `/insurance/providers` | CLINIC_OWNER | `{ name, contactEmail?, contactPhone? }` |
+| GET | `/insurance/policies?patientId=` | manage roles | — |
+| POST | `/insurance/policies` | manage roles | `{ patientId, providerId, policyNumber, memberName?, validFrom?, validTo? }` |
+| GET | `/insurance/claims?invoiceId=&policyId=` | manage roles | — |
+| GET | `/insurance/claims/:id` | manage roles | — |
+| POST | `/insurance/claims` | manage roles | `{ invoiceId, policyId, claimedAmount, notes? }` — 400 if the policy's patient doesn't match the invoice's, or `claimedAmount` exceeds the invoice total |
+| PATCH | `/insurance/claims/:id/respond` | CLINIC_OWNER, ACCOUNTANT | `{ status: APPROVED\|PARTIALLY_APPROVED\|REJECTED\|PAID, approvedAmount?, notes? }` — `approvedAmount` required unless `REJECTED`; `PAID` calls `BillingService.recordPayment` (method `INSURANCE`) |
 
 ### Notifications (`/notifications`)
 
@@ -637,7 +853,7 @@ variant is a small follow-up, not done here), and paying an invoice online
   user with no `clinicId` (rejected).
 - `apps/api/src/common/guards/roles.guard.spec.ts` — `RolesGuard` allow/deny by
   role, and the "no `@Roles()` metadata → allow any authenticated user" default.
-- `apps/api/src/{clinics,doctors,patients,appointments,staff,billing,reports,notifications,prescriptions,patient-portal,branches,inventory}/*.service.spec.ts`
+- `apps/api/src/{clinics,doctors,patients,appointments,staff,billing,reports,notifications,prescriptions,patient-portal,branches,inventory,pharmacy,insurance,audit-log}/*.service.spec.ts`
   — one spec per service, mocking `PrismaService` directly (no DB). Each covers
   the tenant-isolation case ("does a query scoped to clinic A ever return or
   touch clinic B's row" — for `patient-portal`, the equivalent "own userId
@@ -647,7 +863,33 @@ variant is a small follow-up, not done here), and paying an invoice online
   transitions, report aggregation grouping — including the `branchId` filter
   and that it never leaks into the branch-unaware `newPatients` count —
   notification dispatch never throwing, find-or-create `Patient` row on
-  first portal booking, branch CRUD tenant isolation).
+  first portal booking, branch CRUD tenant isolation, pharmacy dispense —
+  unknown item and insufficient stock both rejected inside the same
+  transaction as every other line, so nothing is left partially dispensed —
+  and insurance claims:
+  policy-patient/invoice-patient mismatch rejected, claimed amount capped
+  at the invoice total, `PAID` response routed through
+  `BillingService.recordPayment`, `REJECTED` response never touching
+  billing at all — and the four advanced-analytics methods: doctor revenue
+  attributed via the invoice's linked appointment rather than any direct
+  doctor field, popular-services sorted correctly by revenue descending,
+  and patient retention's zero-appointments short circuit not issuing a
+  second query it doesn't need — and, added 2026-07-22 with the QA/security
+  audit fixes: `patients.service.spec.ts` covers soft-delete being logged
+  and idempotent and `list()` excluding/including inactive patients
+  correctly; `audit-log.service.spec.ts` covers scoping and record shape.
+- `apps/api/src/auth/auth.service.spec.ts` (added 2026-07-22) — login
+  rejecting unknown/wrong-password/deactivated/unverified accounts (each
+  with the right side effect on `LoginEvent`), the 5-failed-attempts
+  lockout, password reset end-to-end including that only a *hash* of the
+  token is ever stored, rejecting a same-as-current-password reset, a
+  wrong-purpose token (verify-email token used to reset) being rejected,
+  and email verification / resend never leaking whether an address is
+  registered.
+- `apps/api/src/common/pagination.util.spec.ts` (added 2026-07-22) —
+  defaults, `skip`/`take` math, clamping an oversized `pageSize` rather
+  than allowing an unbounded request through, and garbage input falling
+  back to the default instead of propagating `NaN`.
 - `apps/api/src/cron/{cron.service,cron-secret.guard}.spec.ts` — the
   reminder query being clinic-agnostic (a system job, not tenant-scoped),
   the tomorrow-calendar-day window, dedup against an already-sent reminder,
@@ -660,7 +902,9 @@ variant is a small follow-up, not done here), and paying an invoice online
   both staff and portal booking.
 - `apps/api/src/doctors/doctors.service.spec.ts` also covers
   `setAvailability` rejecting a `branchId` that doesn't belong to the
-  caller's clinic.
+  caller's clinic, rejecting a duplicate branch-less `(dayOfWeek,
+  startTime)` slot within the same request, and allowing the same
+  day/time for two different branches.
 - `apps/api/src/inventory/inventory.service.spec.ts` — stock computed as
   the ledger sum (including "no transactions yet" → 0, not `null`),
   low-stock filtering against each item's own `reorderLevel`, correct sign
@@ -900,11 +1144,26 @@ interaction gives clear feedback — see [Roadmap § UI/UX quality bar](#2-roadm
 applies incrementally to whatever's being built, not as a retrofit project. What
 that means day to day:
 
-- **Components**: extend `apps/web/src/components/ui/` (currently just `Button`
-  and `Input`) rather than styling one-off elements inline. When a page needs
-  something that doesn't exist yet (a modal, a table, a date picker), add it
-  there so the next page that needs one reuses it instead of a second
-  implementation with its own quirks.
+- **Components**: extend `apps/web/src/components/ui/` (`Button`, `Input`,
+  `BarChart`, `Modal`, `Tabs`, `Pager`) rather than styling one-off elements
+  inline. `Pager` (added 2026-07-22) is plain prev/next links with a `page`
+  query param — no client JS, matching the existing branch-filter-on-reports
+  convention — currently used by `/dashboard/patients` only.
+  `Modal` is a hand-rolled focus-trapped dialog (portal, Escape to close,
+  focus returned to the trigger on close — no dependency exists for this,
+  see `apps/web/package.json`); `Tabs` follows the WAI-ARIA tabs pattern
+  (roving tabindex, arrow-key navigation, panels stay mounted so a tab's
+  in-progress form state survives switching away and back). Both only have
+  real callers so far — `Tabs` on `/dashboard/insurance` (providers/
+  policies/claims); `Modal` as a confirm-before-deactivating step on Staff
+  and Branches, and on cancelling an invoice (replacing a `window.confirm()`
+  that was always meant as a stopgap — see its old comment in git history)
+  — extend rather than duplicate when the next page needs the same shape,
+  but don't reach for `Modal` for a non-destructive action; the existing
+  inline-expand form pattern (`NewStaffForm.tsx` etc.) is still right for
+  those. When a page needs something that doesn't exist yet (a data table,
+  a date picker), add it there so the next page that needs one reuses it
+  instead of a second implementation with its own quirks.
 - **Loading/error feedback**: follow the pattern already established in
   `NewPatientForm.tsx` / `NewStaffForm.tsx` — a `submitting` state that disables
   the submit button and swaps its label, inline error text from the API
@@ -912,11 +1171,22 @@ that means day to day:
   silently does nothing while a request is in flight.
 - **Responsive**: check new pages at desktop, ~1024–1280px (laptop), tablet, and
   mobile widths — no horizontal scroll, no clipped content.
-- **Gaps not yet addressed** (don't assume otherwise): no dark mode, no
-  systematic accessibility pass (focus states/ARIA/contrast), no breadcrumbs, no
-  mobile nav drawer (the dashboard sidebar is desktop-only today), no confirmed
-  custom 404 page. Close these when the page/feature you're building actually
-  needs it, not speculatively.
+- **Accessibility pass, 2026-07-22** (focus states/ARIA/contrast, across every
+  page that existed at the time — not just what this session added): every
+  form's error message now has `role="alert"` so it's actually announced
+  instead of relying on the user spotting red text; every previously-unlabeled
+  input in a repeating row (line items, medicines, dispense lines) got an
+  `aria-label`; the appointment-slot toggle buttons gained `aria-pressed`;
+  `Button` gained a visible `focus-visible` ring (previously the browser
+  default only); the two `text-slate-400` secondary-text usages and one
+  `text-amber-600` status label were below WCAG AA contrast on white and are
+  now `slate-500`/an `amber-700`-on-`amber-50` pill, matching the status-pill
+  convention used elsewhere. **Not done in this pass** — real gaps, not
+  claimed: `<th>` elements across the app's data tables don't have explicit
+  `scope="col"` (most screen readers infer it from simple `<thead>` structure
+  anyway, but it's not asserted); no dark mode; no breadcrumbs; no mobile nav
+  drawer (the dashboard sidebar is desktop-only today). Close these when the
+  page/feature you're building actually needs it, not speculatively.
 
 This is a private, proprietary codebase — these conventions are for the team
 (and any contracted contributors), not a public open-source contribution guide.
@@ -951,12 +1221,20 @@ deploy. No separate LTS/patch branch yet.
 | Postgres row-level security (`rls.sql`) | Written, **not yet wired** into the request path |
 | Password hashing (scrypt + random salt, constant-time compare) | Enforced |
 | Refresh tokens (hashed at rest, rotated every use, revocable) | Enforced |
-| Rate limiting (`ThrottlerGuard`, 100 req/min default; login throttled to 5/min) | Enforced |
+| Email verification | Enforced at login; self-registration only (see [Architecture § Auth](#5-architecture)) |
+| Account lockout | Per-account, 5 failed attempts / 15 min, complementing the IP-based login throttle |
+| Password reset | Token-based (`VerificationToken`), revokes existing sessions on use |
+| Rate limiting (`ThrottlerGuard`) | 100 req/min default; tighter limits on login (5/min), registration/forgot-password/resend-verification (5–10/min), and patient/staff/invoice creation (20/min) |
+| CORS | `API_CORS_ORIGIN` required (no dev fallback) when `NODE_ENV=production` — fails loudly at boot instead of defaulting |
+| Request body size | Capped at 1MB explicitly (was relying on Express defaults) |
+| JWT algorithm | Pinned to `HS256` on both sign and verify (defense-in-depth — passport-jwt's own defaults were already safe) |
 | CSRF | N/A — bearer-token API, not cookie-authenticated; revisit if that changes |
-| Input validation | `class-validator` DTOs, `whitelist: true` on every route |
-| Audit logging | Login events only (`LoginEvent`); no general activity log yet |
+| Input validation | `class-validator` DTOs, `whitelist: true` on every route, numeric/quantity fields bounded with `@Max` |
+| Audit logging | Login events (`LoginEvent`) plus a general-purpose `AuditLog` — only Patient soft-delete/restore emits to it today, not every mutation |
+| Soft delete | Patients (only — see [Architecture § Patients](#5-architecture)); staff/branches/inventory items already had this |
 | Encryption at rest | Delegated to the managed Postgres provider — no field-level encryption yet |
 | Dependency scanning / SAST | Not yet configured |
+| 2FA | Removed unimplemented schema scaffolding rather than half-build it (2026-07-22) — see Changelog |
 
 If you're changing authentication, tenant scoping, or role checks, treat it as
 security-sensitive: get a second review before merging, regardless of how small
@@ -972,7 +1250,127 @@ grouped by what landed, most recent first.
 
 ### [Unreleased]
 
+**Security** — response to the full QA/security audit (2026-07-22): 18 of 24
+findings fully fixed, 2 partially (documented below), 4 acknowledged with no
+code change because the audit itself said so (not urgent, or already fine).
+The audit's own release recommendation was "No-Go — one blocker"; that
+blocker (patient hard-delete) is the first item here.
+- **Patients are soft-deleted, not hard-deleted** (Critical — TC-SEC-01,
+  High — TC-DB-01). `DELETE /patients/:id` used to cascade-destroy a
+  patient's entire clinical/billing/insurance history in one irreversible
+  call with nothing logged. Now flips `Patient.isActive` (same pattern as
+  staff/branches/inventory items) and logs to a new `AuditLog` model;
+  `PATCH /patients/:id/restore` undoes it. See
+  [Architecture § Patients](#5-architecture).
+- **Password reset + email verification, for real** (High — TC-AUTH-01;
+  Medium — TC-AUTH-02). `POST /auth/forgot-password` /
+  `/reset-password` / `/verify-email` / `/resend-verification`, a new
+  `VerificationToken` model (same hashed-random-token shape as
+  `RefreshToken`), and `/forgot-password` + `/reset-password` +
+  `/verify-email` pages. `login()` now actually enforces
+  `isEmailVerified` — previously set at signup and never read again.
+- **Pagination, applied honestly, not cosmetically** (Medium —
+  TC-FUNC-01/TC-PERF-01). Every list endpoint used to run a fully unbounded
+  query. `/patients` gets real pager UI (`GET /patients` now bounded +
+  counted, `components/ui/Pager.tsx`); seven more (appointments, invoices,
+  staff, notifications, inventory, prescriptions, insurance) are now
+  bounded (`take: 200`) without page-through UI yet — see
+  [Architecture § Patients](#5-architecture) for why the response shape
+  didn't change to avoid breaking every existing caller.
+- **Per-account login lockout** (Medium — TC-AUTH-04): 5 failed attempts /
+  15 min, complementing the existing IP-based throttle on `/auth/login`.
+- **2FA schema scaffolding removed** (Medium — TC-AUTH-03):
+  `User.isTwoFactorEnabled`/`twoFactorSecret` had zero implementation
+  behind them — worse than absent, since the data model implied protection
+  that didn't exist. Real TOTP-based MFA is a standalone feature, not
+  something to half-build here.
+- **General audit log** (Low — TC-DB-04): new `AuditLog` model + `GET
+  /audit-log` (CLINIC_OWNER). Only Patient soft-delete/restore emits to it
+  today — extend call-site by call-site as other modules' trails become
+  worth having, not speculatively.
+- **Scoped error/loading boundaries** (Medium — TC-UX-01; Low — TC-UX-02):
+  `(dashboard)/dashboard/error.tsx` and `portal/error.tsx` so a failed
+  panel doesn't take the sidebar/header down with it (previously only one
+  `app/error.tsx` existed, at the root); `loading.tsx` for Reports,
+  Advanced analytics, and Billing.
+- **Hardening**: JWT algorithm pinned to `HS256` on sign + verify
+  (Low — TC-AUTH-08); `API_CORS_ORIGIN` required with no dev fallback in
+  production (Low — TC-SEC-07); explicit 1MB request body size limit
+  (Low — TC-API-03); tighter per-route throttling on registration,
+  password-reset requests, and patient/staff/invoice creation
+  (Low — TC-SEC-08); every quantity/amount DTO field bounded with `@Max`,
+  not just checked for a sane minimum (Low — TC-FUNC-02); resetting a
+  password now rejects reusing the current one, and revokes every existing
+  session (Low — TC-AUTH-05, partial — no N-deep history or breach-list
+  check, which would need either a history table or an external API); the
+  unused `STORAGE_*` env vars and the never-built file-upload path are now
+  documented as unimplemented rather than looking wired up
+  (Low — TC-FUNC-03); `NewInvoiceForm` pre-validates discount+tax against
+  subtotal client-side instead of only catching it after a round trip
+  (Low — TC-EDGE-02).
+- **Acknowledged, no code change** — the audit's own text already called
+  these not urgent or already-adequate: sequential invoice numbers are
+  never used as a lookup key so there's no real enumeration path
+  (Medium — TC-HACK-02); role checks only living at the controller layer
+  is "not urgent given the consistency found... worth a lint rule if the
+  team grows" (Low — TC-AUTHZ-03); report aggregation happening in
+  application code instead of SQL `GROUP BY` is "a deliberate, documented
+  tradeoff... worth revisiting if [data volume] grows"
+  (Low — TC-PERF-02); Unicode/emoji handling was already confirmed fine
+  (Postgres `text` columns are UTF-8 by default, no charset-restricting
+  validator exists) (Low — TC-EDGE-03).
+- Fixed a real bug found while writing `AuthService.requestPasswordReset`:
+  it passed the looked-up `user.email` (typed `string | null`, since email
+  is an optional column) to the mailer instead of the function's own
+  non-null `email` parameter — a type error, not a runtime bug, but a
+  reminder that "found by X" doesn't make TypeScript treat a field as
+  narrowed to X.
+
 **Added**
+- **Doctor management UI.** `/dashboard/doctors` — the dashboard page that's
+  been missing since Phase 1: list, create, edit profile, and a
+  weekly-availability editor at `/dashboard/doctors/:id` (full-schedule
+  replace per `PATCH /doctors/:id/availability`, pre-filled with the
+  doctor's current week, per-slot `branchId` only offered once the clinic
+  has a branch). See [Architecture § Multi-branch](#5-architecture).
+- **`Modal` and `Tabs`** join `components/ui/` (see
+  [Contributing § Frontend conventions](#10-contributing--conventions)).
+  `Tabs` now runs `/dashboard/insurance`'s providers/policies/claims
+  sections; `Modal` now gates Staff and Branch deactivation behind a
+  confirm step (reactivating stays a single click — it isn't destructive).
+  `Button` gained a `danger` variant for the confirm action and a visible
+  focus-visible ring (previously relied on the browser default).
+- **Phase 3 complete — advanced analytics, the last item.** Extends the
+  existing Reports endpoints rather than a new module (see
+  [Architecture § Advanced analytics](#5-architecture)): doctor performance
+  (appointments + revenue attributed via the linked appointment), popular
+  services (aggregated from `Invoice.lineItems`), a daily patient-growth
+  series, and patient retention (returning vs. new in a window).
+  `resolveRange`/`dayKey` extracted to `apps/api/src/reports/date-range.util.ts`
+  so the original four Reports endpoints and these four share one
+  implementation. `/dashboard/reports/advanced`, plus a new shared
+  `components/ui/BarChart.tsx` (extracted from the Reports page's revenue
+  chart — this is its second caller, not a speculative extraction).
+- **Phase 3, insurance.** `InsuranceProvider` (catalog) + `InsurancePolicy`
+  (per-patient coverage) + `InsuranceClaim` (filed against an invoice).
+  Claims settle *through* Billing — marking a claim `PAID` calls
+  `BillingService.recordPayment` (new `PaymentMethod.INSURANCE` value)
+  rather than touching `Invoice.amountPaid` directly, reusing its balance
+  logic (see [Architecture § Insurance](#5-architecture)). Filing a claim
+  validates the policy belongs to the invoice's own patient and that
+  `claimedAmount` doesn't exceed the invoice total. `apps/api/src/insurance/`,
+  `/dashboard/insurance` (providers, policies, claims + inline
+  approve/reject/pay), `insurance.service.spec.ts`.
+- **Phase 3, pharmacy.** Dispensing a prescription against Inventory —
+  built as a workflow over the existing `Prescription`/`Inventory` models
+  rather than a new domain (see [Architecture § Pharmacy](#5-architecture)):
+  `Prescription.dispensedAt` + `InventoryTransaction.prescriptionId`,
+  `apps/api/src/pharmacy/` (pending list, dispense — pre-validates every
+  line before writing any transaction), `/dashboard/pharmacy` +
+  `/dashboard/pharmacy/[id]` UI, `pharmacy.service.spec.ts`. No new
+  `PHARMACIST` role. `InventoryService.recordTransaction` gained an
+  internal (not DTO-exposed) `prescriptionId` param to link a dispense back
+  to its prescription without duplicating stock-write logic.
 - **Deployment.** `render.yaml` blueprint for `apps/api` (Render), a
   `GET /health` endpoint it depends on, and concrete Vercel/Neon/cron-job.org
   setup steps in [Deployment](#8-deployment) — apps/web needs no `vercel.json`
@@ -1077,6 +1475,29 @@ grouped by what landed, most recent first.
   with no explicit config).
 - `.github/workflows/ci.yml`: install, lint, typecheck, test, build on
   push/PR to `main`.
+
+**Fixed** — gaps flagged by the QA/security review, closed 2026-07-22:
+- **Pharmacy multi-line dispense is now atomic.** `PharmacyService.dispense`
+  wraps every line's check + write in one `prisma.$transaction`, passed
+  through `InventoryService.recordTransaction`'s new optional trailing `db`
+  parameter (defaults to the ambient `PrismaService`, so every other caller
+  is unaffected). See [Architecture § Pharmacy](#5-architecture).
+- **`DoctorAvailability` duplicate branch-less slots are now rejected.**
+  Postgres can't enforce this itself (`NULL != NULL`); `setAvailability`
+  now rejects a duplicate `(branchId, dayOfWeek, startTime)` within the same
+  request with a 400. See [Architecture § Multi-branch](#5-architecture).
+- **`Branch.isActive` deactivation is now actually enforced somewhere.**
+  The doc comment on `BranchesService.setStatus` always described this;
+  the doctor-availability editor is the first real caller that reads it.
+  See [Architecture § Multi-branch](#5-architecture).
+- `Input` silently replaced its whole `className` instead of merging it
+  (any caller passing one, e.g. for a grid span, would have lost the
+  component's own input styling entirely) — no caller hit this until the
+  new Doctor forms needed it. Fixed to merge onto the wrapping `<div>`.
+- **Accessibility pass** across every page that existed before this session
+  (focus states, ARIA, contrast) — see
+  [Contributing § Frontend conventions](#10-contributing--conventions) for
+  the full breakdown of what changed and what's still honestly outstanding.
 
 **Fixed** — Phase 1 + Staff Management audit against the engineering charter's
 Definition of Done (`CLAUDE.md`), 2026-07-21:

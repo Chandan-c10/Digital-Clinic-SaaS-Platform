@@ -95,6 +95,21 @@ describe("StaffService", () => {
     );
   });
 
+  it("marks a staff account pre-verified — the owner vouches for the email, unlike self-registration", async () => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue(null);
+    (prisma.user.create as jest.Mock).mockResolvedValue({ id: "new-staff" });
+    const dto = {
+      name: "New Staff",
+      email: "new@example.com",
+      password: "password123",
+      role: Role.NURSE,
+    } as CreateStaffDto;
+    await service.create("clinic-1", dto);
+    expect(prisma.user.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ isEmailVerified: true }) }),
+    );
+  });
+
   it("revokes live sessions when deactivating, but not when reactivating", async () => {
     (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: "staff-1" });
     (prisma.user.update as jest.Mock).mockResolvedValue({ id: "staff-1", isActive: false });

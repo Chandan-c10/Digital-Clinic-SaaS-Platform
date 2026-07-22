@@ -34,8 +34,16 @@ export function NewInvoiceForm({ patients }: { patients: Patient[] }) {
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    setSubmitting(true);
     setError(null);
+
+    // Mirrors BillingService.create's own check (QA/security audit,
+    // TC-EDGE-02) — was previously only caught after a full round trip.
+    if (total < 0) {
+      setError("Discount cannot exceed subtotal plus tax");
+      return;
+    }
+
+    setSubmitting(true);
 
     const res = await fetch("/api/billing/invoices", {
       method: "POST",
@@ -93,6 +101,7 @@ export function NewInvoiceForm({ patients }: { patients: Patient[] }) {
         {lineItems.map((item, index) => (
           <div key={index} className="grid grid-cols-12 gap-2">
             <input
+              aria-label={`Line ${index + 1} description`}
               className="col-span-6 rounded-md border border-slate-300 px-3 py-2 text-sm"
               placeholder="Description"
               value={item.description}
@@ -100,6 +109,7 @@ export function NewInvoiceForm({ patients }: { patients: Patient[] }) {
               required
             />
             <input
+              aria-label={`Line ${index + 1} quantity`}
               type="number"
               min={1}
               className="col-span-2 rounded-md border border-slate-300 px-3 py-2 text-sm"
@@ -109,6 +119,7 @@ export function NewInvoiceForm({ patients }: { patients: Patient[] }) {
               required
             />
             <input
+              aria-label={`Line ${index + 1} unit price`}
               type="number"
               min={0}
               step="0.01"
@@ -120,7 +131,8 @@ export function NewInvoiceForm({ patients }: { patients: Patient[] }) {
             />
             <button
               type="button"
-              className="col-span-1 text-sm text-red-600 hover:text-red-700 disabled:opacity-30"
+              aria-label={`Remove line ${index + 1}`}
+              className="col-span-1 text-sm text-red-600 hover:text-red-700 disabled:opacity-30 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
               disabled={lineItems.length === 1}
               onClick={() => setLineItems((items) => items.filter((_, i) => i !== index))}
             >
@@ -163,16 +175,20 @@ export function NewInvoiceForm({ patients }: { patients: Patient[] }) {
           <span>Subtotal</span>
           <span>{subtotal.toFixed(2)}</span>
         </div>
-        <div className="mt-1 flex justify-between font-semibold text-slate-900">
+        <div className={`mt-1 flex justify-between font-semibold ${total < 0 ? "text-red-600" : "text-slate-900"}`}>
           <span>Total</span>
           <span>{total.toFixed(2)}</span>
         </div>
       </div>
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && (
+        <p role="alert" className="text-sm text-red-600">
+          {error}
+        </p>
+      )}
 
       <div className="flex gap-2">
-        <Button type="submit" disabled={submitting || !patientId}>
+        <Button type="submit" disabled={submitting || !patientId || total < 0}>
           {submitting ? "Creating…" : "Create invoice"}
         </Button>
         <Button type="button" variant="secondary" onClick={() => setOpen(false)}>

@@ -87,7 +87,11 @@ export function NewStaffForm() {
           ))}
         </select>
       </div>
-      {error && <p className="col-span-full text-sm text-red-600">{error}</p>}
+      {error && (
+        <p role="alert" className="col-span-full text-sm text-red-600">
+          {error}
+        </p>
+      )}
       <div className="col-span-full flex gap-2">
         <Button type="submit" disabled={submitting}>
           {submitting ? "Saving…" : "Save staff member"}

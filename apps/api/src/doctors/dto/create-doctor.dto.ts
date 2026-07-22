@@ -1,4 +1,4 @@
-import { IsArray, IsEmail, IsInt, IsNumber, IsOptional, IsString, Min, MinLength } from "class-validator";
+import { IsArray, IsEmail, IsInt, IsNumber, IsOptional, IsString, Max, Min, MinLength } from "class-validator";
 
 export class CreateDoctorDto {
   @IsEmail()
@@ -14,8 +14,9 @@ export class CreateDoctorDto {
   @IsOptional() @IsString() qualification?: string;
   @IsOptional() @IsString() specialization?: string;
   @IsOptional() @IsString() registrationNumber?: string;
-  @IsOptional() @IsInt() @Min(0) experienceYears?: number;
-  @IsOptional() @IsNumber() consultationFee?: number;
+  // QA/security audit, TC-FUNC-02: bounded rather than any positive integer.
+  @IsOptional() @IsInt() @Min(0) @Max(70) experienceYears?: number;
+  @IsOptional() @IsNumber() @Min(0) @Max(1_000_000) consultationFee?: number;
   @IsOptional() @IsString() bio?: string;
   @IsOptional() @IsArray() @IsString({ each: true }) languagesSpoken?: string[];
 }

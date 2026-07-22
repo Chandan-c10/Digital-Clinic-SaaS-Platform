@@ -57,7 +57,7 @@ export default async function StaffPage() {
                   </span>
                 </td>
                 <td className="px-5 py-3 text-right">
-                  <StaffStatusToggle id={member.id} isActive={member.isActive} />
+                  <StaffStatusToggle id={member.id} name={member.name} isActive={member.isActive} />
                 </td>
               </tr>
             ))}

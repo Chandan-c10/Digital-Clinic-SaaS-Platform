@@ -53,7 +53,7 @@ export default async function InventoryPage() {
                     >
                       {item.name}
                     </Link>
-                    {!item.isActive && <span className="ml-2 text-xs text-slate-400">(inactive)</span>}
+                    {!item.isActive && <span className="ml-2 text-xs text-slate-500">(inactive)</span>}
                   </td>
                   <td className="px-5 py-3 text-slate-600">{item.category ?? "—"}</td>
                   <td className="px-5 py-3 text-slate-600">

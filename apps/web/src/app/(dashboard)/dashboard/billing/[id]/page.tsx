@@ -129,7 +129,7 @@ export default async function InvoiceDetailPage({ params }: { params: { id: stri
                   {invoice.currency} {Number(payment.amount).toFixed(2)}
                 </span>
                 <span className="text-slate-500"> via {payment.method.replace("_", " ")}</span>
-                {payment.reference && <span className="text-slate-400"> ({payment.reference})</span>}
+                {payment.reference && <span className="text-slate-500"> ({payment.reference})</span>}
               </div>
               <span className="text-slate-500">{new Date(payment.paidAt).toLocaleString()}</span>
             </li>

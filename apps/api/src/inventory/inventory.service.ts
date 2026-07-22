@@ -1,9 +1,15 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import { InventoryTransactionType } from "@digital-clinic/database";
+import { InventoryTransactionType, Prisma } from "@digital-clinic/database";
 import { PrismaService } from "../prisma/prisma.service";
+import { MAX_PAGE_SIZE } from "../common/pagination.util";
 import { CreateInventoryItemDto } from "./dto/create-item.dto";
 import { UpdateInventoryItemDto } from "./dto/update-item.dto";
 import { CreateInventoryTransactionDto } from "./dto/create-transaction.dto";
+
+/** Either the ambient PrismaService or an interactive-transaction client —
+ * lets recordTransaction() participate in a caller's transaction (see
+ * PharmacyService.dispense) instead of always committing on its own. */
+type Db = PrismaService | Prisma.TransactionClient;
 
 /**
  * Converts a user-facing (always-positive, except for ADJUSTED) quantity
@@ -31,6 +37,7 @@ export class InventoryService {
     const items = await this.prisma.inventoryItem.findMany({
       where: { clinicId, ...(filters.category && { category: filters.category }) },
       orderBy: { name: "asc" },
+      take: MAX_PAGE_SIZE, // QA/security audit, TC-FUNC-01 / TC-PERF-01
     });
 
     const withStock = await Promise.all(
@@ -80,42 +87,56 @@ export class InventoryService {
    * negative" unambiguous without needing every clinic to have adopted
    * branches consistently across its whole transaction history.
    */
-  async stockFor(itemId: string, branchId?: string | null): Promise<number> {
-    const result = await this.prisma.inventoryTransaction.aggregate({
+  async stockFor(itemId: string, branchId?: string | null, db: Db = this.prisma): Promise<number> {
+    const result = await db.inventoryTransaction.aggregate({
       where: { itemId, branchId: branchId ?? null },
       _sum: { quantity: true },
     });
     return result._sum.quantity ?? 0;
   }
 
+  /**
+   * `prescriptionId` is not part of the public DTO (a staff member manually
+   * recording a transaction via /inventory shouldn't set it) — it's an
+   * internal param only PharmacyService passes, linking a DISPENSED
+   * transaction back to the prescription it was dispensed against.
+   *
+   * `db` defaults to the ambient PrismaService but accepts an interactive
+   * transaction client so callers dispensing multiple lines (PharmacyService)
+   * can make every line's stock check + write atomic — see the doc comment
+   * on `Db` above.
+   */
   async recordTransaction(
     clinicId: string,
     itemId: string,
     performedById: string,
     dto: CreateInventoryTransactionDto,
+    prescriptionId?: string,
+    db: Db = this.prisma,
   ) {
-    await this.assertItemInClinic(clinicId, itemId);
+    const item = await db.inventoryItem.findFirst({ where: { id: itemId, clinicId } });
+    if (!item) throw new NotFoundException("Inventory item not found");
 
     if (dto.quantity === 0) {
       throw new BadRequestException("Quantity must not be zero");
     }
 
     if (dto.branchId) {
-      const branch = await this.prisma.branch.findFirst({
+      const branch = await db.branch.findFirst({
         where: { id: dto.branchId, clinicId },
       });
       if (!branch) throw new BadRequestException("Branch does not belong to this clinic");
     }
 
     const delta = signedQuantity(dto.type, dto.quantity);
-    const currentStock = await this.stockFor(itemId, dto.branchId);
+    const currentStock = await this.stockFor(itemId, dto.branchId, db);
     if (currentStock + delta < 0) {
       throw new BadRequestException(
         `This would take stock negative (current: ${currentStock}, change: ${delta})`,
       );
     }
 
-    return this.prisma.inventoryTransaction.create({
+    return db.inventoryTransaction.create({
       data: {
         clinicId,
         itemId,
@@ -124,6 +145,7 @@ export class InventoryService {
         quantity: delta,
         reason: dto.reason,
         performedById,
+        prescriptionId,
       },
     });
   }

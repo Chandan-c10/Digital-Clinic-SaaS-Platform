@@ -1,4 +1,4 @@
-import { IsDateString, IsEnum, IsInt, IsOptional, IsString, Min } from "class-validator";
+import { IsDateString, IsEnum, IsInt, IsOptional, IsString, Max, Min } from "class-validator";
 import { AppointmentType } from "@digital-clinic/database";
 
 export class CreateAppointmentDto {
@@ -11,7 +11,8 @@ export class CreateAppointmentDto {
   @IsDateString()
   scheduledAt!: string;
 
-  @IsOptional() @IsInt() @Min(5) durationMinutes?: number;
+  // QA/security audit, TC-FUNC-02: bounded to a workday-ish upper limit.
+  @IsOptional() @IsInt() @Min(5) @Max(480) durationMinutes?: number;
 
   @IsOptional() @IsEnum(AppointmentType) type?: AppointmentType;
 

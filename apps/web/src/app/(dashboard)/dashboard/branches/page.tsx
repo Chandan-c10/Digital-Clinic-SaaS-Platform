@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { apiFetch } from "@/lib/api";
 import type { Branch } from "@/lib/types";
 import { NewBranchForm } from "./NewBranchForm";
@@ -14,7 +15,11 @@ export default async function BranchesPage() {
           <p className="text-sm text-slate-500">
             Optional — a clinic with a single location doesn&rsquo;t need any branches. Add one per
             physical location once you have more than one; doctors then set separate availability
-            per branch (via the API for now — no dedicated UI for that yet).
+            per branch from their profile under{" "}
+            <Link href="/dashboard/doctors" className="text-brand-600 hover:underline">
+              Doctors
+            </Link>
+            .
           </p>
         </div>
         <NewBranchForm />
@@ -59,7 +64,7 @@ export default async function BranchesPage() {
                   </span>
                 </td>
                 <td className="px-5 py-3 text-right">
-                  <BranchStatusToggle id={branch.id} isActive={branch.isActive} />
+                  <BranchStatusToggle id={branch.id} name={branch.name} isActive={branch.isActive} />
                 </td>
               </tr>
             ))}

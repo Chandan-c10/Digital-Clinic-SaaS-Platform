@@ -2,6 +2,7 @@ import { ConflictException, ForbiddenException, Injectable, NotFoundException } 
 import { NotificationChannel, NotificationType } from "@digital-clinic/database";
 import { PrismaService } from "../prisma/prisma.service";
 import { NotificationsService } from "../notifications/notifications.service";
+import { MAX_PAGE_SIZE } from "../common/pagination.util";
 import { CreatePrescriptionDto } from "./dto/create-prescription.dto";
 
 const PRESCRIPTION_INCLUDE = {
@@ -21,6 +22,7 @@ export class PrescriptionsService {
       where: { clinicId, ...filters },
       include: PRESCRIPTION_INCLUDE,
       orderBy: { createdAt: "desc" },
+      take: MAX_PAGE_SIZE, // QA/security audit, TC-FUNC-01 / TC-PERF-01
     });
   }
 

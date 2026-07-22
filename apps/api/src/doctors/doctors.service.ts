@@ -41,7 +41,10 @@ export class DoctorsService {
           passwordHash: hashPassword(password),
           role: Role.DOCTOR,
           clinicId,
-          isEmailVerified: false,
+          // Entered by an already-authenticated CLINIC_OWNER vouching for
+          // it, not self-registration — see the identical comment in
+          // StaffService.create (QA/security audit, TC-AUTH-02).
+          isEmailVerified: true,
         },
       });
 
@@ -68,6 +71,24 @@ export class DoctorsService {
       if (branches.length !== branchIds.length) {
         throw new BadRequestException("One or more branches don't belong to this clinic");
       }
+    }
+
+    // Postgres treats NULL as distinct from NULL, so the DB's unique
+    // constraint on (doctorId, branchId, dayOfWeek, startTime) can't catch
+    // duplicate slots for single-branch clinics, where branchId is always
+    // null (see the schema comment on DoctorAvailability) — reject them
+    // here instead. This is the only place availability rows are ever
+    // written (always a full replace, never an incremental insert), so
+    // catching it on the way in fully closes the gap.
+    const seen = new Set<string>();
+    for (const slot of dto.slots) {
+      const key = `${slot.branchId ?? ""}|${slot.dayOfWeek}|${slot.startTime}`;
+      if (seen.has(key)) {
+        throw new BadRequestException(
+          `Duplicate availability slot for day ${slot.dayOfWeek} at ${slot.startTime}`,
+        );
+      }
+      seen.add(key);
     }
 
     return this.prisma.$transaction(async (tx) => {

@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, UseGuards } from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
 import { Role } from "@digital-clinic/database";
 import { Roles } from "../common/decorators/roles.decorator";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
@@ -30,7 +31,10 @@ export class StaffController {
     return this.staffService.activity(user.clinicId!, id);
   }
 
+  // QA/security audit, TC-SEC-08 — see the identical comment on
+  // PatientsController.create.
   @Post()
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   create(@CurrentUser() user: RequestUser, @Body() dto: CreateStaffDto) {
     return this.staffService.create(user.clinicId!, dto);
   }

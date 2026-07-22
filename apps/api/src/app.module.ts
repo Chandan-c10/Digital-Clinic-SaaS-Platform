@@ -20,6 +20,9 @@ import { PatientPortalModule } from "./patient-portal/patient-portal.module";
 import { BranchesModule } from "./branches/branches.module";
 import { InventoryModule } from "./inventory/inventory.module";
 import { CronModule } from "./cron/cron.module";
+import { PharmacyModule } from "./pharmacy/pharmacy.module";
+import { InsuranceModule } from "./insurance/insurance.module";
+import { AuditLogModule } from "./audit-log/audit-log.module";
 
 @Module({
   imports: [
@@ -40,6 +43,9 @@ import { CronModule } from "./cron/cron.module";
     BranchesModule,
     InventoryModule,
     CronModule,
+    PharmacyModule,
+    InsuranceModule,
+    AuditLogModule,
   ],
   controllers: [AppController],
   providers: [

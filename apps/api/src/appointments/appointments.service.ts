@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { AppointmentStatus, AppointmentType, NotificationChannel, NotificationType } from "@digital-clinic/database";
 import { PrismaService } from "../prisma/prisma.service";
 import { NotificationsService } from "../notifications/notifications.service";
+import { MAX_PAGE_SIZE } from "../common/pagination.util";
 import { CreateAppointmentDto } from "./dto/create-appointment.dto";
 import { UpdateAppointmentStatusDto } from "./dto/update-appointment-status.dto";
 import { RescheduleAppointmentDto } from "./dto/reschedule-appointment.dto";
@@ -54,6 +55,11 @@ export class AppointmentsService {
       where: { clinicId, ...filters },
       include: { patient: true, doctor: true },
       orderBy: { scheduledAt: "asc" },
+      // QA/security audit, TC-FUNC-01 / TC-PERF-01: bounded, not paginated —
+      // see apps/api/src/common/pagination.util.ts's doc comment for why
+      // this is the "at least not unbounded" tier rather than full page-
+      // through UI, same tradeoff NotificationsService.list() already made.
+      take: MAX_PAGE_SIZE,
     });
   }
 

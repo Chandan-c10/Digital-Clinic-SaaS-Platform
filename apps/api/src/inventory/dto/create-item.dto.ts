@@ -1,4 +1,4 @@
-import { IsInt, IsOptional, IsString, Min, MinLength } from "class-validator";
+import { IsInt, IsOptional, IsString, Max, Min, MinLength } from "class-validator";
 
 export class CreateInventoryItemDto {
   @IsString()
@@ -12,5 +12,6 @@ export class CreateInventoryItemDto {
 
   @IsOptional() @IsString() category?: string;
 
-  @IsOptional() @IsInt() @Min(0) reorderLevel?: number;
+  // QA/security audit, TC-FUNC-02: bounded rather than any positive integer.
+  @IsOptional() @IsInt() @Min(0) @Max(1_000_000) reorderLevel?: number;
 }

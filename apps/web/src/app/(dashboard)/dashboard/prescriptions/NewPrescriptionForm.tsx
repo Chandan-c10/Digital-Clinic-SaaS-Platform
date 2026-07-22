@@ -94,6 +94,7 @@ export function NewPrescriptionForm({ patients }: { patients: Patient[] }) {
         {medicines.map((medicine, index) => (
           <div key={index} className="grid grid-cols-12 gap-2">
             <input
+              aria-label={`Medicine ${index + 1} name`}
               className="col-span-3 rounded-md border border-slate-300 px-3 py-2 text-sm"
               placeholder="Name"
               value={medicine.name}
@@ -101,6 +102,7 @@ export function NewPrescriptionForm({ patients }: { patients: Patient[] }) {
               required
             />
             <input
+              aria-label={`Medicine ${index + 1} dosage`}
               className="col-span-2 rounded-md border border-slate-300 px-3 py-2 text-sm"
               placeholder="Dosage"
               value={medicine.dosage}
@@ -108,6 +110,7 @@ export function NewPrescriptionForm({ patients }: { patients: Patient[] }) {
               required
             />
             <input
+              aria-label={`Medicine ${index + 1} frequency`}
               className="col-span-2 rounded-md border border-slate-300 px-3 py-2 text-sm"
               placeholder="Frequency"
               value={medicine.frequency}
@@ -115,6 +118,7 @@ export function NewPrescriptionForm({ patients }: { patients: Patient[] }) {
               required
             />
             <input
+              aria-label={`Medicine ${index + 1} duration in days`}
               type="number"
               min={1}
               className="col-span-1 rounded-md border border-slate-300 px-3 py-2 text-sm"
@@ -124,6 +128,7 @@ export function NewPrescriptionForm({ patients }: { patients: Patient[] }) {
               required
             />
             <input
+              aria-label={`Medicine ${index + 1} instructions (optional)`}
               className="col-span-3 rounded-md border border-slate-300 px-3 py-2 text-sm"
               placeholder="Instructions (optional)"
               value={medicine.instructions}
@@ -131,7 +136,8 @@ export function NewPrescriptionForm({ patients }: { patients: Patient[] }) {
             />
             <button
               type="button"
-              className="col-span-1 text-sm text-red-600 hover:text-red-700 disabled:opacity-30"
+              aria-label={`Remove medicine ${index + 1}`}
+              className="col-span-1 text-sm text-red-600 hover:text-red-700 disabled:opacity-30 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
               disabled={medicines.length === 1}
               onClick={() => setMedicines((rows) => rows.filter((_, i) => i !== index))}
             >
@@ -150,7 +156,11 @@ export function NewPrescriptionForm({ patients }: { patients: Patient[] }) {
 
       <Input label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && (
+        <p role="alert" className="text-sm text-red-600">
+          {error}
+        </p>
+      )}
 
       <div className="flex gap-2">
         <Button type="submit" disabled={submitting || !patientId}>

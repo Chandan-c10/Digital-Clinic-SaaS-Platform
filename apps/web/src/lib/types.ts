@@ -4,6 +4,7 @@ export interface Patient {
   phone?: string | null;
   email?: string | null;
   gender?: string | null;
+  isActive: boolean;
   createdAt: string;
 }
 
@@ -38,6 +39,29 @@ export interface DoctorProfile {
   displayName: string;
   specialization?: string | null;
   qualification?: string | null;
+}
+
+export interface DoctorAvailabilitySlot {
+  id: string;
+  dayOfWeek: number; // 0 (Sun) – 6 (Sat)
+  startTime: string; // "09:00"
+  endTime: string;
+  slotDurationMinutes: number;
+  isActive: boolean;
+  branchId?: string | null;
+}
+
+// Full DoctorProfile record, as returned by GET /doctors and /doctors/:id —
+// DoctorProfile above stays the minimal shape other modules embed doctors
+// with (Appointment.doctor, Prescription.doctor).
+export interface DoctorDetail extends DoctorProfile {
+  registrationNumber?: string | null;
+  experienceYears?: number | null;
+  consultationFee?: string | null; // Decimal -> JSON string, see the note above on Invoice
+  bio?: string | null;
+  languagesSpoken: string[];
+  createdAt: string;
+  availabilities: DoctorAvailabilitySlot[];
 }
 
 export type AppointmentStatus = "PENDING" | "CONFIRMED" | "CANCELLED" | "COMPLETED" | "NO_SHOW";
@@ -92,6 +116,34 @@ export interface Invoice {
   payments?: Payment[];
 }
 
+export interface InsuranceProvider {
+  id: string;
+  name: string;
+  contactEmail?: string | null;
+  contactPhone?: string | null;
+  isActive: boolean;
+}
+
+export interface InsurancePolicy {
+  id: string;
+  policyNumber: string;
+  memberName?: string | null;
+  provider: InsuranceProvider;
+  patient?: Patient;
+}
+
+export type InsuranceClaimStatus = "SUBMITTED" | "APPROVED" | "PARTIALLY_APPROVED" | "REJECTED" | "PAID";
+
+export interface InsuranceClaim {
+  id: string;
+  status: InsuranceClaimStatus;
+  claimedAmount: string;
+  approvedAmount?: string | null;
+  submittedAt: string;
+  policy: InsurancePolicy;
+  invoice: { id: string; invoiceNumber: number; totalAmount: string };
+}
+
 export interface Medicine {
   name: string;
   dosage: string;
@@ -107,6 +159,18 @@ export interface Prescription {
   createdAt: string;
   patient: Patient;
   doctor: DoctorProfile;
+  dispensedAt?: string | null;
+}
+
+export interface PharmacyDispenseRecord {
+  id: string;
+  quantity: number;
+  createdAt: string;
+  item: { name: string; unit: string };
+}
+
+export interface PharmacyPrescription extends Prescription {
+  dispenses?: PharmacyDispenseRecord[];
 }
 
 // Patient Portal — same records as above, but viewed by the patient across

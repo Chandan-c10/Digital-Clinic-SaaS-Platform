@@ -21,7 +21,11 @@ export function LoginForm() {
     <form action={formAction} className="space-y-4">
       <Input label="Email" name="email" type="email" required autoComplete="email" />
       <Input label="Password" name="password" type="password" required autoComplete="current-password" />
-      {state?.error && <p className="text-sm text-red-600">{state.error}</p>}
+      {state?.error && (
+        <p role="alert" className="text-sm text-red-600">
+          {state.error}
+        </p>
+      )}
       <SubmitButton />
     </form>
   );

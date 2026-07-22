@@ -15,6 +15,7 @@ function makePrismaMock() {
       aggregate: jest
         .fn()
         .mockResolvedValue({ _sum: { totalAmount: decimal(0), amountPaid: decimal(0) } }),
+      findMany: jest.fn().mockResolvedValue([]),
     },
     appointment: {
       groupBy: jest.fn().mockResolvedValue([]),
@@ -22,6 +23,10 @@ function makePrismaMock() {
     },
     patient: {
       count: jest.fn().mockResolvedValue(0),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    doctorProfile: {
+      findMany: jest.fn().mockResolvedValue([]),
     },
   } as unknown as PrismaService;
 }
@@ -127,5 +132,80 @@ describe("ReportsService", () => {
     await service.overview("clinic-1", "2026-07-01", "2026-07-31");
     const invoiceCall = (prisma.invoice.aggregate as jest.Mock).mock.calls[0][0];
     expect(invoiceCall.where).not.toHaveProperty("branchId");
+  });
+
+  it("doctorPerformance() attributes revenue via the invoice's linked appointment, not by doctor id directly", async () => {
+    (prisma.doctorProfile.findMany as jest.Mock).mockResolvedValue([
+      { id: "doc-1", displayName: "Dr. Rao" },
+      { id: "doc-2", displayName: "Dr. Iyer" },
+    ]);
+    (prisma.appointment.groupBy as jest.Mock).mockResolvedValue([
+      { doctorId: "doc-1", status: "COMPLETED", _count: { _all: 3 } },
+      { doctorId: "doc-1", status: "NO_SHOW", _count: { _all: 1 } },
+    ]);
+    (prisma.invoice.findMany as jest.Mock).mockResolvedValue([
+      { amountPaid: decimal(500), appointment: { doctorId: "doc-1" } },
+      { amountPaid: decimal(300), appointment: { doctorId: "doc-1" } },
+    ]);
+
+    const result = await service.doctorPerformance("clinic-1", "2026-07-01", "2026-07-31");
+
+    const doc1 = result.find((r) => r.doctorId === "doc-1");
+    const doc2 = result.find((r) => r.doctorId === "doc-2");
+    expect(doc1).toMatchObject({ totalAppointments: 4, revenue: 800 });
+    expect(doc2).toMatchObject({ totalAppointments: 0, revenue: 0 });
+  });
+
+  it("popularServices() aggregates invoice line items by description and sorts by revenue desc", async () => {
+    (prisma.invoice.findMany as jest.Mock).mockResolvedValue([
+      { lineItems: [{ description: "Consultation", quantity: 1, unitPrice: 500 }] },
+      { lineItems: [{ description: "Consultation", quantity: 1, unitPrice: 500 }] },
+      { lineItems: [{ description: "Blood test", quantity: 1, unitPrice: 800 }] },
+    ]);
+
+    const result = await service.popularServices("clinic-1", "2026-07-01", "2026-07-31");
+
+    expect(result[0]).toEqual({ description: "Consultation", count: 2, revenue: 1000 });
+    expect(result[1]).toEqual({ description: "Blood test", count: 1, revenue: 800 });
+  });
+
+  it("patientGrowth() scopes to the caller's clinic and groups new-patient counts by day", async () => {
+    (prisma.patient.findMany as jest.Mock).mockResolvedValue([
+      { createdAt: new Date("2026-07-10T09:00:00.000Z") },
+      { createdAt: new Date("2026-07-10T15:00:00.000Z") },
+      { createdAt: new Date("2026-07-12T09:00:00.000Z") },
+    ]);
+
+    const result = await service.patientGrowth("clinic-1", "2026-07-01", "2026-07-31");
+
+    expect(prisma.patient.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ clinicId: "clinic-1" }) }),
+    );
+    expect(result).toEqual([
+      { date: "2026-07-10", count: 2 },
+      { date: "2026-07-12", count: 1 },
+    ]);
+  });
+
+  it("patientRetention() reports 0/0/0 with no appointments in range, without querying prior history", async () => {
+    (prisma.appointment.findMany as jest.Mock).mockResolvedValueOnce([]);
+    const result = await service.patientRetention("clinic-1", "2026-07-01", "2026-07-31");
+    expect(result).toMatchObject({ totalPatients: 0, returningPatients: 0, retentionRate: 0 });
+    expect(prisma.appointment.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("patientRetention() splits patients into returning (seen before the window) vs new", async () => {
+    (prisma.appointment.findMany as jest.Mock)
+      .mockResolvedValueOnce([{ patientId: "p1" }, { patientId: "p2" }]) // seen in range
+      .mockResolvedValueOnce([{ patientId: "p1" }]); // seen before range (returning)
+
+    const result = await service.patientRetention("clinic-1", "2026-07-01", "2026-07-31");
+
+    expect(result).toMatchObject({
+      totalPatients: 2,
+      returningPatients: 1,
+      newPatients: 1,
+      retentionRate: 0.5,
+    });
   });
 });

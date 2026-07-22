@@ -14,7 +14,8 @@ export class AvailabilitySlotDto {
   @IsInt() @Min(0) @Max(6) dayOfWeek!: number;
   @IsString() startTime!: string;
   @IsString() endTime!: string;
-  @IsInt() @Min(5) slotDurationMinutes!: number;
+  // QA/security audit, TC-FUNC-02: bounded to a workday-ish upper limit.
+  @IsInt() @Min(5) @Max(480) slotDurationMinutes!: number;
   /// Which branch this slot is at (module Z) — omit for single-branch clinics.
   @IsOptional() @IsString() branchId?: string;
 }

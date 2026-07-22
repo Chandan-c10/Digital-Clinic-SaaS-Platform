@@ -61,6 +61,41 @@ export async function registerClinicAction(_prevState: unknown, formData: FormDa
   redirect("/dashboard");
 }
 
+export async function forgotPasswordAction(_prevState: unknown, formData: FormData) {
+  const email = String(formData.get("email") ?? "");
+
+  const res = await fetch(`${API_BASE_URL}/auth/forgot-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+    cache: "no-store",
+  });
+
+  const body = await res.json().catch(() => ({ message: undefined }));
+  // Same message whether or not the account exists (the API is designed
+  // the same way) — don't let a validation error (e.g. malformed email)
+  // silently look identical to success, but never say "not found".
+  return { message: res.ok ? body.message : body.message ?? "Could not process that request" };
+}
+
+export async function resetPasswordAction(_prevState: unknown, formData: FormData) {
+  const token = String(formData.get("token") ?? "");
+  const newPassword = String(formData.get("newPassword") ?? "");
+
+  const res = await fetch(`${API_BASE_URL}/auth/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, newPassword }),
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ message: "Could not reset password" }));
+    return { error: Array.isArray(body.message) ? body.message.join(", ") : body.message };
+  }
+  redirect("/login?reset=1");
+}
+
 export async function logoutAction() {
   const refreshToken = cookies().get(REFRESH_TOKEN_COOKIE)?.value;
   if (refreshToken) {

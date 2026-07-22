@@ -41,4 +41,42 @@ export class ReportsController {
   ) {
     return this.reportsService.appointmentTrend(user.clinicId!, from, to, branchId);
   }
+
+  @Get("doctor-performance")
+  doctorPerformance(
+    @CurrentUser() user: RequestUser,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("branchId") branchId?: string,
+  ) {
+    return this.reportsService.doctorPerformance(user.clinicId!, from, to, branchId);
+  }
+
+  @Get("popular-services")
+  popularServices(
+    @CurrentUser() user: RequestUser,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("branchId") branchId?: string,
+  ) {
+    return this.reportsService.popularServices(user.clinicId!, from, to, branchId);
+  }
+
+  @Get("patient-growth")
+  patientGrowth(
+    @CurrentUser() user: RequestUser,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+  ) {
+    return this.reportsService.patientGrowth(user.clinicId!, from, to);
+  }
+
+  @Get("patient-retention")
+  patientRetention(
+    @CurrentUser() user: RequestUser,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+  ) {
+    return this.reportsService.patientRetention(user.clinicId!, from, to);
+  }
 }

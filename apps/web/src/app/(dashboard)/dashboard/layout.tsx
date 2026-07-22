@@ -14,10 +14,13 @@ const ALL_STAFF_ROLES = ["CLINIC_OWNER", "DOCTOR", "RECEPTIONIST", "NURSE", "ACC
 const NAV_LINKS = [
   { href: "/dashboard", label: "Overview" },
   { href: "/dashboard/appointments", label: "Appointments", roles: STAFF_ROLES },
+  { href: "/dashboard/doctors", label: "Doctors", roles: STAFF_ROLES },
   { href: "/dashboard/patients", label: "Patients", roles: STAFF_ROLES },
   { href: "/dashboard/prescriptions", label: "Prescriptions", roles: STAFF_ROLES },
   { href: "/dashboard/billing", label: "Billing", roles: BILLING_ROLES },
+  { href: "/dashboard/insurance", label: "Insurance", roles: ["CLINIC_OWNER", "RECEPTIONIST", "ACCOUNTANT"] },
   { href: "/dashboard/inventory", label: "Inventory", roles: ALL_STAFF_ROLES },
+  { href: "/dashboard/pharmacy", label: "Pharmacy", roles: STAFF_ROLES },
   { href: "/dashboard/reports", label: "Reports", roles: REPORTS_ROLES },
   { href: "/dashboard/staff", label: "Staff", roles: ["CLINIC_OWNER"] },
   { href: "/dashboard/branches", label: "Branches", roles: ["CLINIC_OWNER"] },

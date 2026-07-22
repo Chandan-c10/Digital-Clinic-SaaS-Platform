@@ -165,7 +165,7 @@ async function main() {
     },
   });
 
-  await prisma.prescription.create({
+  const prescription = await prisma.prescription.create({
     data: {
       clinicId: clinic.id,
       patientId: patient.id,
@@ -210,7 +210,7 @@ async function main() {
     },
   });
 
-  await prisma.invoice.create({
+  const unpaidInvoice = await prisma.invoice.create({
     data: {
       clinicId: clinic.id,
       patientId: patient.id,
@@ -225,6 +225,38 @@ async function main() {
       amountPaid: 0,
       status: "UNPAID",
       createdById: receptionist.id,
+    },
+  });
+
+  const insuranceProvider = await prisma.insuranceProvider.create({
+    data: {
+      clinicId: clinic.id,
+      name: "Star Health Insurance",
+      contactEmail: "claims@starhealth.test",
+    },
+  });
+
+  const insurancePolicy = await prisma.insurancePolicy.create({
+    data: {
+      clinicId: clinic.id,
+      patientId: patient.id,
+      providerId: insuranceProvider.id,
+      policyNumber: "SH-2026-00042",
+      memberName: patient.name,
+    },
+  });
+
+  // A claim in flight (SUBMITTED, not yet responded to) against the unpaid
+  // invoice above — demonstrates Insurance end-to-end without pre-deciding
+  // the outcome, so the seeded clinic owner has something real to approve
+  // or reject via /dashboard/insurance.
+  await prisma.insuranceClaim.create({
+    data: {
+      clinicId: clinic.id,
+      invoiceId: unpaidInvoice.id,
+      policyId: insurancePolicy.id,
+      claimedAmount: 1200,
+      submittedById: receptionist.id,
     },
   });
 
@@ -251,16 +283,25 @@ async function main() {
     },
   });
 
+  // Linked to the seeded prescription above — demonstrates Pharmacy
+  // end-to-end (dispense recorded + Prescription.dispensedAt stamped),
+  // the same as PharmacyService.dispense does for real.
   await prisma.inventoryTransaction.create({
     data: {
       clinicId: clinic.id,
       itemId: paracetamol.id,
       branchId: branch.id,
+      prescriptionId: prescription.id,
       type: "DISPENSED",
       quantity: -20,
-      reason: "Dispensed against prescriptions",
+      reason: `Dispensed for prescription ${prescription.id}`,
       performedById: receptionist.id,
     },
+  });
+
+  await prisma.prescription.update({
+    where: { id: prescription.id },
+    data: { dispensedAt: new Date() },
   });
 
   // Below its reorderLevel (30) — demonstrates the low-stock indicator.

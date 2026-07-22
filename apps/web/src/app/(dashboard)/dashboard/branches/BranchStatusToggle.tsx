@@ -2,10 +2,21 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { Modal } from "@/components/ui/Modal";
+import { Button } from "@/components/ui/Button";
 
-export function BranchStatusToggle({ id, isActive }: { id: string; isActive: boolean }) {
+export function BranchStatusToggle({
+  id,
+  name,
+  isActive,
+}: {
+  id: string;
+  name: string;
+  isActive: boolean;
+}) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   async function toggle() {
     setSubmitting(true);
@@ -15,21 +26,55 @@ export function BranchStatusToggle({ id, isActive }: { id: string; isActive: boo
       body: JSON.stringify({ isActive: !isActive }),
     });
     setSubmitting(false);
+    setConfirmOpen(false);
     router.refresh();
   }
 
+  // Reactivating isn't destructive — only confirm before deactivating.
+  if (!isActive) {
+    return (
+      <button
+        type="button"
+        onClick={toggle}
+        disabled={submitting}
+        className="text-sm font-medium text-brand-600 hover:text-brand-700 disabled:opacity-50"
+      >
+        Reactivate
+      </button>
+    );
+  }
+
   return (
-    <button
-      type="button"
-      onClick={toggle}
-      disabled={submitting}
-      className={
-        isActive
-          ? "text-sm font-medium text-red-600 hover:text-red-700 disabled:opacity-50"
-          : "text-sm font-medium text-brand-600 hover:text-brand-700 disabled:opacity-50"
-      }
-    >
-      {isActive ? "Deactivate" : "Reactivate"}
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => setConfirmOpen(true)}
+        disabled={submitting}
+        className="text-sm font-medium text-red-600 hover:text-red-700 disabled:opacity-50"
+      >
+        Deactivate
+      </button>
+      <Modal
+        open={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        title="Deactivate branch?"
+        footer={
+          <>
+            <Button type="button" variant="secondary" onClick={() => setConfirmOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="button" variant="danger" onClick={toggle} disabled={submitting}>
+              {submitting ? "Deactivating…" : "Deactivate"}
+            </Button>
+          </>
+        }
+      >
+        <p>
+          <strong>{name}</strong> will no longer be offered as a choice when a doctor sets
+          availability. Existing appointments, invoices, prescriptions, and availability rows already
+          linked to it are unaffected.
+        </p>
+      </Modal>
+    </>
   );
 }

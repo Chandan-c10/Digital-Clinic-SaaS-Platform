@@ -10,7 +10,12 @@ export default function LoginPage() {
         <div className="mt-6">
           <LoginForm />
         </div>
-        <p className="mt-6 text-center text-sm text-slate-500">
+        <p className="mt-3 text-center text-sm text-slate-500">
+          <Link href="/forgot-password" className="font-medium text-brand-600 hover:text-brand-700">
+            Forgot your password?
+          </Link>
+        </p>
+        <p className="mt-3 text-center text-sm text-slate-500">
           New here?{" "}
           <Link href="/register" className="font-medium text-brand-600 hover:text-brand-700">
             Start a free trial

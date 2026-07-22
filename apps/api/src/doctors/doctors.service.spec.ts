@@ -75,6 +75,23 @@ describe("DoctorsService", () => {
     );
   });
 
+  it("marks a doctor account pre-verified — the owner vouches for the email, unlike self-registration", async () => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue(null);
+    prisma.__tx.user.create.mockResolvedValue({ id: "new-user" });
+    prisma.__tx.doctorProfile.create.mockResolvedValue({ id: "new-doctor" });
+
+    const dto = {
+      email: "dr.new@example.com",
+      password: "password123",
+      displayName: "Dr. New",
+    } as CreateDoctorDto;
+    await service.create("clinic-1", dto);
+
+    expect(prisma.__tx.user.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ isEmailVerified: true }) }),
+    );
+  });
+
   it("refuses to set availability for a doctor outside the caller's clinic", async () => {
     (prisma.doctorProfile.findFirst as jest.Mock).mockResolvedValue(null);
     await expect(
@@ -102,6 +119,40 @@ describe("DoctorsService", () => {
       }),
     ).rejects.toThrow(BadRequestException);
     expect(prisma.__tx.doctorAvailability.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate branch-less availability slots (Postgres NULL != NULL can't catch this itself)", async () => {
+    (prisma.doctorProfile.findFirst as jest.Mock).mockResolvedValue({ id: "doctor-1" });
+    await expect(
+      service.setAvailability("clinic-1", "doctor-1", {
+        slots: [
+          { dayOfWeek: 1, startTime: "09:00", endTime: "12:00", slotDurationMinutes: 15 },
+          { dayOfWeek: 1, startTime: "09:00", endTime: "13:00", slotDurationMinutes: 30 },
+        ],
+      }),
+    ).rejects.toThrow(BadRequestException);
+    expect(prisma.__tx.doctorAvailability.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("allows the same day/time slot for two different branches", async () => {
+    (prisma.doctorProfile.findFirst as jest.Mock).mockResolvedValue({ id: "doctor-1" });
+    (prisma.branch.findMany as jest.Mock).mockResolvedValue([{ id: "branch-1" }, { id: "branch-2" }]);
+    prisma.__tx.doctorAvailability.findMany.mockResolvedValue([]);
+
+    await service.setAvailability("clinic-1", "doctor-1", {
+      slots: [
+        { dayOfWeek: 1, startTime: "09:00", endTime: "12:00", slotDurationMinutes: 15, branchId: "branch-1" },
+        { dayOfWeek: 1, startTime: "09:00", endTime: "12:00", slotDurationMinutes: 15, branchId: "branch-2" },
+      ],
+    });
+
+    expect(prisma.__tx.doctorAvailability.deleteMany).toHaveBeenCalled();
+    expect(prisma.__tx.doctorAvailability.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.arrayContaining([
+        expect.objectContaining({ branchId: "branch-1" }),
+        expect.objectContaining({ branchId: "branch-2" }),
+      ]) }),
+    );
   });
 
   it("accepts availability slots naming a branch that belongs to the caller's clinic", async () => {

@@ -3,12 +3,12 @@ import { InputHTMLAttributes, forwardRef } from "react";
 type Props = InputHTMLAttributes<HTMLInputElement> & { label: string };
 
 export const Input = forwardRef<HTMLInputElement, Props>(function Input(
-  { label, id, ...props },
+  { label, id, className = "", ...props },
   ref,
 ) {
   const inputId = id ?? props.name;
   return (
-    <div className="space-y-1">
+    <div className={`space-y-1 ${className}`}>
       <label htmlFor={inputId} className="block text-sm font-medium text-slate-700">
         {label}
       </label>

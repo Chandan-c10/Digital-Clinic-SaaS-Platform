@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { InvoiceStatus, NotificationChannel, NotificationType, Prisma } from "@digital-clinic/database";
 import { PrismaService } from "../prisma/prisma.service";
 import { NotificationsService } from "../notifications/notifications.service";
+import { MAX_PAGE_SIZE } from "../common/pagination.util";
 import { CreateInvoiceDto } from "./dto/create-invoice.dto";
 import { RecordPaymentDto } from "./dto/record-payment.dto";
 
@@ -32,6 +33,7 @@ export class BillingService {
       where: { clinicId, ...filters },
       include: { patient: true },
       orderBy: { createdAt: "desc" },
+      take: MAX_PAGE_SIZE, // QA/security audit, TC-FUNC-01 / TC-PERF-01
     });
   }
 

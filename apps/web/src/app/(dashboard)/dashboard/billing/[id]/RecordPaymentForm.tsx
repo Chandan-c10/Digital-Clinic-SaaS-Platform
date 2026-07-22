@@ -82,7 +82,11 @@ export function RecordPaymentForm({
           onChange={(e) => setReference(e.target.value)}
         />
       </div>
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && (
+        <p role="alert" className="text-sm text-red-600">
+          {error}
+        </p>
+      )}
       <Button type="submit" disabled={submitting}>
         {submitting ? "Recording…" : "Record payment"}
       </Button>
