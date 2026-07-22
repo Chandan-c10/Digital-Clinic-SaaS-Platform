@@ -13,6 +13,7 @@ interface SendParams {
   recipient: string | null | undefined;
   subject?: string;
   body: string;
+  appointmentId?: string;
 }
 
 @Injectable()
@@ -58,6 +59,7 @@ export class NotificationsService {
           recipient: params.recipient,
           subject: params.subject,
           body: params.body,
+          appointmentId: params.appointmentId,
         },
       });
 
@@ -86,6 +88,16 @@ export class NotificationsService {
         }`,
       );
     }
+  }
+
+  /** Dedup check for the reminder cron (apps/api/src/cron/) — avoids sending
+   * a second reminder if the job runs more than once for the same day. */
+  async reminderAlreadySent(appointmentId: string): Promise<boolean> {
+    const existing = await this.prisma.notification.findFirst({
+      where: { appointmentId, type: NotificationType.APPOINTMENT_REMINDER },
+      select: { id: true },
+    });
+    return existing !== null;
   }
 
   private providerFor(channel: NotificationChannel): NotificationProvider {

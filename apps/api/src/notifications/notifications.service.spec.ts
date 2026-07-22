@@ -9,6 +9,7 @@ function makePrismaMock() {
   return {
     notification: {
       findMany: jest.fn(),
+      findFirst: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
     },
@@ -99,6 +100,37 @@ describe("NotificationsService", () => {
     expect(prisma.notification.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: "FAILED", error: "No SMS provider configured" }),
+      }),
+    );
+  });
+
+  it("passes appointmentId through to the stored notification", async () => {
+    (prisma.notification.create as jest.Mock).mockResolvedValue({ id: "n3" });
+    emailProvider.send.mockResolvedValue({ status: "SENT" });
+
+    await service.send({
+      clinicId: "clinic-1",
+      channel: NotificationChannel.EMAIL,
+      type: NotificationType.APPOINTMENT_REMINDER,
+      recipient: "patient@example.com",
+      body: "Reminder",
+      appointmentId: "appt-1",
+    });
+
+    expect(prisma.notification.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ appointmentId: "appt-1" }) }),
+    );
+  });
+
+  it("reminderAlreadySent() reflects whether a reminder notification exists for that appointment", async () => {
+    (prisma.notification.findFirst as jest.Mock).mockResolvedValue(null);
+    expect(await service.reminderAlreadySent("appt-1")).toBe(false);
+
+    (prisma.notification.findFirst as jest.Mock).mockResolvedValue({ id: "existing" });
+    expect(await service.reminderAlreadySent("appt-1")).toBe(true);
+    expect(prisma.notification.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { appointmentId: "appt-1", type: "APPOINTMENT_REMINDER" },
       }),
     );
   });

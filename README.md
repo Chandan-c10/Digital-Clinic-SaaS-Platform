@@ -581,6 +581,16 @@ CLINIC_OWNER, NURSE, RECEPTIONIST. See
 | PATCH | `/inventory/items/:id` | CLINIC_OWNER | partial of the above + `isActive?` |
 | POST | `/inventory/items/:id/transactions` | CLINIC_OWNER, NURSE, RECEPTIONIST | `{ type: RECEIVED\|DISPENSED\|ADJUSTED\|EXPIRED\|DAMAGED, quantity, branchId?, reason? }` — rejected with 400 if it would take stock negative |
 
+### Cron (`/internal/cron`)
+
+Not a user-facing route — called by an external scheduler (cron-job.org,
+see [Deployment](#8-deployment)). `@Public()` + a shared-secret header
+instead of a JWT, and not tenant-scoped (runs across every clinic).
+
+| Method | Path | Access | Body |
+|---|---|---|---|
+| POST | `/internal/cron/appointment-reminders` | header `x-cron-secret: <CRON_SECRET>` | — none; returns `{ sent, skipped }` |
+
 ### Notifications (`/notifications`)
 
 CLINIC_OWNER only, read-only — an audit log, not a way to trigger sends
@@ -638,6 +648,11 @@ variant is a small follow-up, not done here), and paying an invoice online
   and that it never leaks into the branch-unaware `newPatients` count —
   notification dispatch never throwing, find-or-create `Patient` row on
   first portal booking, branch CRUD tenant isolation).
+- `apps/api/src/cron/{cron.service,cron-secret.guard}.spec.ts` — the
+  reminder query being clinic-agnostic (a system job, not tenant-scoped),
+  the tomorrow-calendar-day window, dedup against an already-sent reminder,
+  and the shared-secret guard rejecting a missing/wrong header or an
+  unconfigured `CRON_SECRET`.
 - `apps/api/src/appointments/available-slots.util.spec.ts` — the shared
   slot-computation logic (excludes booked times, ignores other days/inactive
   windows, never returns a past slot) plus `resolveBranchForTime` (which
@@ -693,17 +708,90 @@ scaffolding an empty one now.
 
 ### Target environments
 
-- **MVP**: Render (API + Web), Neon (managed Postgres), Cloudflare R2 (object
-  storage, not yet wired up in code).
-- **Production scale**: cloud-ready for AWS/GCP/Azure, Docker/Kubernetes — not
-  yet built out; `docker-compose.yml` today only stands up local Postgres for
-  development, it is not a deployment artifact.
+**apps/web → Vercel, apps/api → Render, database → Neon, appointment
+reminders → cron-job.org.** Cloudflare R2 (object storage) is named as the
+intended provider but not yet wired into any code (no file-upload feature
+exists yet). `docker-compose.yml` only stands up local Postgres for
+development — not a deployment artifact.
+
+### Neon (database)
+
+1. Create a project at [neon.tech](https://neon.tech). Free tier works for
+   development; move to a paid plan (Launch or above) before real patient
+   data goes in it — free tier's storage cap (0.5 GB) and 6-hour
+   point-in-time-recovery window are tight for production use.
+2. Copy the connection string (includes `?sslmode=require`) — this is
+   `DATABASE_URL`.
+3. **Before the first deploy**, generate the initial migration locally
+   (this repo has none yet — see [§ Database migrations](#database-migrations-in-production)
+   below): `pnpm db:migrate` against a local Postgres, commit the generated
+   `packages/database/prisma/migrations/` directory.
+
+### Render (backend, `apps/api`)
+
+`render.yaml` in the repo root is a Render Blueprint — connect the repo,
+choose "New +" → "Blueprint" in the Render dashboard, and it reads this file
+automatically instead of needing manual service configuration. It:
+- Runs `prisma migrate deploy` (not `migrate dev`) before starting the
+  server on every deploy, so schema changes apply automatically.
+- Uses the `starter` plan, not free — Render's free web services spin down
+  after 15 minutes idle and take 30–60s to cold-start on the next request,
+  which reads as "broken" to a receptionist booking the first appointment
+  of the day.
+- Defines a health check at `GET /health` (`apps/api/src/app.controller.ts`,
+  intentionally `@Public()`).
+- Auto-generates `JWT_ACCESS_SECRET` and `CRON_SECRET`. You still need to
+  set manually in the Render dashboard: `DATABASE_URL` (from Neon),
+  `API_CORS_ORIGIN` (the Vercel frontend URL, set after the next step),
+  and `SMTP_*` if you want real email notifications rather than recorded
+  failures.
+
+### Vercel (frontend, `apps/web`)
+
+No `vercel.json` needed — `apps/web` has no dependency on
+`@digital-clinic/database` or any workspace package (it talks to the API
+only over HTTP), so Vercel's standard Next.js build works with dashboard
+settings alone:
+
+1. Import the repo into Vercel, framework preset **Next.js**.
+2. **Root Directory**: `apps/web`. Vercel auto-detects the pnpm workspace
+   root from `pnpm-workspace.yaml` at the repo root.
+3. Environment variables: `NEXT_PUBLIC_API_URL` (the Render backend URL,
+   including `/api/v1` — see `lib/constants.ts`), `NEXT_PUBLIC_APP_DOMAIN`.
+4. After deploying, go back to Render and set `API_CORS_ORIGIN` to this
+   Vercel URL (CORS is enforced in `apps/api/src/main.ts`).
+
+### cron-job.org (appointment reminders)
+
+`NotificationType.APPOINTMENT_REMINDER` existed in the schema since Phase 2
+but nothing triggered it until `apps/api/src/cron/` — an endpoint an
+external scheduler calls once a day, rather than an in-process
+`@nestjs/schedule` job (Render's free/starter tiers don't guarantee a
+long-running process stays warm the way a dedicated cron worker would, and
+this avoids adding that infrastructure for one daily job).
+
+1. At [cron-job.org](https://cron-job.org), create a job:
+   - URL: `https://<your-render-url>/api/v1/internal/cron/appointment-reminders`
+   - Method: `POST`
+   - Header: `x-cron-secret: <the CRON_SECRET Render generated>`
+   - Schedule: once daily, e.g. 7:00 AM in the clinic's timezone.
+2. The endpoint finds every `CONFIRMED` appointment scheduled for the next
+   calendar day across all clinics, emails a reminder, and skips any
+   appointment that already has one recorded (dedup via
+   `NotificationsService.reminderAlreadySent`, checked against
+   `Notification.appointmentId`) — safe to trigger more than once without
+   double-sending. Auth is the shared-secret header only (`CronSecretGuard`)
+   — this route is deliberately `@Public()` since the caller isn't a logged-in
+   user, and it isn't tenant-scoped (it's a system job, not a per-clinic
+   request) — see the doc comment on `CronService.sendAppointmentReminders`.
 
 ### Environments
 
-Local → Staging → Production is the intended separation; only local exists today
-(via `.env` + `docker-compose.yml`). Staging/production environment configs,
-secrets management, and a deploy pipeline are not yet set up.
+Local → Staging → Production is the intended separation; only local +
+production exist today. A staging setup is cheap to add later — Neon
+supports database branching (a copy-on-write DB branch from production),
+Render a second service pointed at a different branch, and Vercel already
+creates a preview deployment per branch/PR automatically.
 
 ### CI
 
@@ -885,6 +973,16 @@ grouped by what landed, most recent first.
 ### [Unreleased]
 
 **Added**
+- **Deployment.** `render.yaml` blueprint for `apps/api` (Render), a
+  `GET /health` endpoint it depends on, and concrete Vercel/Neon/cron-job.org
+  setup steps in [Deployment](#8-deployment) — apps/web needs no `vercel.json`
+  since it has no dependency on `@digital-clinic/database` (talks to the API
+  only over HTTP). Closed a real gap this surfaced: `NotificationType
+  .APPOINTMENT_REMINDER` existed since Phase 2 but nothing ever triggered
+  it — `apps/api/src/cron/` is a shared-secret-guarded, `@Public()`,
+  non-tenant-scoped endpoint an external scheduler calls daily, finding
+  tomorrow's confirmed appointments and emailing reminders with dedup via a
+  new `Notification.appointmentId` field.
 - **Phase 3, inventory.** `InventoryItem` (catalog) + `InventoryTransaction`
   (append-only signed-delta ledger — current stock is always computed via
   `SUM(quantity)`, never cached, see
